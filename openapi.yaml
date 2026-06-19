@@ -1,0 +1,683 @@
+openapi: 3.0.3
+
+info:
+  title: OperFi Partner API
+  version: "1.0.0"
+  description: |
+    The OperFi Partner API lets clients and TMS platforms push loads, with
+    their paperwork, into OperFi in bulk. OperFi is the source of truth; this
+    API is a one-way inbound feeder, not a two-way financial sync.
+
+    ## How it works
+
+    1. Push loads with `POST /v1/loads` (batch). Each load lands in OperFi as a
+       **draft**. Drafts are never auto-submitted.
+    2. Attach paperwork with `POST /v1/loads/{ref}/documents`.
+    3. The broker reviews, resolves anything unmatched, and submits inside the
+       OperFi portal.
+    4. Optionally poll `GET /v1/loads/{ref}` for the integration status.
+
+    Validation is **lenient on create, strict on submit.** A load with an
+    unmatched customer or carrier still lands as a draft; those come back as
+    `warnings`, and the broker resolves them in the portal. Only a malformed
+    payload is rejected.
+
+    ## Identity
+
+    Identity is always determined server-side from your API key (and, in
+    Platform mode, the `OperFi-Client-Ref` header). It is never read from the
+    request body. You cannot push loads on behalf of a client your key is not
+    authorized for.
+
+    ## What this API does not do
+
+    It does not send funding or payment data back to your system. There are no
+    outbound webhooks and no payment callbacks. `GET /v1/loads/{ref}` returns
+    integration status only, never financial data.
+
+    ## Authentication modes
+
+    - **Direct** — one API key maps to one OperFi client. The `OperFi-Client-Ref`
+      header is ignored.
+    - **Platform** — one API key maps to many clients (for TMS platforms). Every
+      write must carry `OperFi-Client-Ref`, validated against your key's roster
+      before any write occurs.
+
+    ## Versioning
+
+    The API is versioned in the path (`/v1`). Additive changes (new optional
+    fields, new endpoints) ship within `v1` without breaking. Any breaking
+    change ships as `/v2` with `v1` supported in parallel for a published
+    deprecation window.
+
+    ## Getting a key
+
+    Keys are issued by OperFi during partner onboarding. You receive an
+    `sk_test_` key for the sandbox first; after a successful test, you receive
+    an `sk_live_` key for production. Keys are secret and can be rotated on
+    request. Platform partners have their authorized-client roster provisioned
+    by OperFi.
+  contact:
+    name: OperFi Integrations
+    email: integrations@operfi.com
+
+servers:
+  - url: https://api.operfi.com/v1
+    description: Production
+  - url: https://sandbox-api.operfi.com/v1
+    description: Sandbox (safe to test against; never touches live funding)
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Loads
+    description: Push loads into OperFi and check their integration status.
+  - name: Documents
+    description: Attach paperwork to a load.
+  - name: Reference data
+    description: Look up the client's on-file customers and carriers, with OperFi IDs.
+
+paths:
+  /loads:
+    post:
+      tags: [Loads]
+      summary: Create loads (batch)
+      operationId: createLoads
+      description: |
+        Push one or more loads. The body is always an array under `loads`, even
+        for a single load, so you write one code path for any batch size.
+
+        Each load lands as a **draft**. The response returns a per-load result
+        so one bad load never sinks the batch. Re-posting a load with a
+        `source_load_ref` you already sent returns the existing draft with
+        `status: "duplicate"` (idempotent), never a second draft.
+
+        Up to 500 loads per request. Split larger batches client-side.
+      parameters:
+        - $ref: '#/components/parameters/ClientRef'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLoadsRequest'
+      responses:
+        '200':
+          description: |
+            Batch processed. Inspect each entry in `results` for its
+            individual `status` (`received`, `duplicate`, or `rejected`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateLoadsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenClientRef'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          description: The batch could not be processed as a whole (e.g. exceeds the 500-load cap or is not a valid loads array).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /loads/{ref}:
+    get:
+      tags: [Loads]
+      summary: Get a load's integration status
+      operationId: getLoad
+      description: |
+        Returns the integration status of a load for debugging your
+        integration. Returns status only — never funding or payment data.
+      parameters:
+        - $ref: '#/components/parameters/LoadRef'
+      responses:
+        '200':
+          description: The load's integration status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoadStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/LoadNotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /loads/{ref}/documents:
+    post:
+      tags: [Documents]
+      summary: Attach a document to a load
+      operationId: addLoadDocuments
+      description: |
+        Upload one or more files to a load. Tag each file with its
+        `document_type` so OperFi routes it to the correct customer or carrier
+        packet. Max 25 MB per file. Accepted: PDF, PNG, JPG, TIFF.
+      parameters:
+        - $ref: '#/components/parameters/LoadRef'
+        - $ref: '#/components/parameters/ClientRef'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/DocumentUpload'
+            encoding:
+              files:
+                contentType: application/pdf, image/png, image/jpeg, image/tiff
+      responses:
+        '200':
+          description: Documents accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentUploadResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenClientRef'
+        '404':
+          $ref: '#/components/responses/LoadNotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          description: One or more files use an unsupported document type or file format.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /customers:
+    get:
+      tags: [Reference data]
+      summary: List the client's on-file customers
+      operationId: listCustomers
+      description: |
+        Returns the client's credit-approved customers, each with its OperFi
+        `customer_id`. Tag a load's `customer_id` from this list so it lands
+        already resolved. Only credit-approved customers are returned, because
+        only those can be funded on submit.
+      parameters:
+        - $ref: '#/components/parameters/ClientRef'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A page of customers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenClientRef'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /carriers:
+    get:
+      tags: [Reference data]
+      summary: List the client's on-file carriers
+      operationId: listCarriers
+      description: |
+        Returns the client's on-file carriers, each with its OperFi
+        `carrier_id`, MC, and USDOT. Tag a load's `carrier_id` (or send
+        `carrier_mc` / `carrier_usdot`) so it lands already resolved. The `dnu`
+        flag marks a do-not-use carrier.
+      parameters:
+        - $ref: '#/components/parameters/ClientRef'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A page of carriers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CarrierList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenClientRef'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Send your API key as a bearer token: `Authorization: Bearer sk_live_...`.
+        Use your `sk_test_...` key against the sandbox server. Never expose a key
+        in client-side code.
+
+  parameters:
+    ClientRef:
+      name: OperFi-Client-Ref
+      in: header
+      required: false
+      description: |
+        Platform mode only. Identifies which client in your roster this request
+        is for. Required on every write in Platform mode; validated against your
+        key's authorized-client roster before any write. Ignored in Direct mode.
+      schema:
+        type: string
+        example: "ACME-LOGISTICS-001"
+    LoadRef:
+      name: ref
+      in: path
+      required: true
+      description: The OperFi load reference (`operfi_load_ref`) returned when the load was created.
+      schema:
+        type: string
+        example: "DL-0001923"
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size. Default 100, max 500.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 100
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque cursor from a previous response's `next_cursor`. Omit for the first page.
+      schema:
+        type: string
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid API key.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: unauthorized
+              message: Missing or invalid API key.
+              request_id: req_01HZ8XK2P3
+    ForbiddenClientRef:
+      description: The `OperFi-Client-Ref` is not in your key's authorized-client roster.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: forbidden_client_ref
+              message: client_ref "ACME-LOGISTICS-001" is not authorized for this key.
+              field: OperFi-Client-Ref
+              request_id: req_01HZ8XK2P4
+    LoadNotFound:
+      description: No load exists with that reference for this client.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: load_not_found
+              message: No load found with ref "DL-0001923".
+              request_id: req_01HZ8XK2P5
+    PayloadTooLarge:
+      description: The request or a file exceeds the allowed size.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: payload_too_large
+              message: File exceeds the 25 MB limit.
+              request_id: req_01HZ8XK2P6
+    RateLimited:
+      description: Too many requests. Retry after the period in the `Retry-After` header.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: rate_limited
+              message: Rate limit exceeded. Retry after 30 seconds.
+              request_id: req_01HZ8XK2P7
+    InternalError:
+      description: An unexpected error occurred. Safe to retry.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: internal_error
+              message: An unexpected error occurred.
+              request_id: req_01HZ8XK2P8
+
+  schemas:
+
+    CreateLoadsRequest:
+      type: object
+      required: [loads]
+      properties:
+        loads:
+          type: array
+          minItems: 1
+          maxItems: 500
+          description: The loads to create. Max 500 per request.
+          items:
+            $ref: '#/components/schemas/LoadInput'
+
+    LoadInput:
+      type: object
+      required: [source_load_ref]
+      description: |
+        A single load. `source_load_ref` is required and is the idempotency key.
+        Customer and carrier may be sent by OperFi ID (preferred — lands
+        resolved) or by raw value (name / MC / USDOT — resolved, or surfaced as
+        a warning for the broker to resolve in-portal). Rates and references are
+        needed to submit, but a load missing them still lands as a draft.
+      properties:
+        source_load_ref:
+          type: string
+          description: Your own unique load or invoice number. Idempotency key. Re-sending the same value returns the existing draft.
+          example: "TMS-88231"
+        customer_id:
+          type: string
+          description: OperFi customer ID from `GET /v1/customers`. Preferred; lands resolved.
+          example: "3773785000000956013"
+        customer_name:
+          type: string
+          description: Raw customer name, used when `customer_id` is not supplied. Resolved against the client's on-file customers; an unmatched name comes back as a warning.
+          example: "ABC Shipping LLC"
+        customer_reference_number:
+          type: string
+          description: The customer's reference / PO number for this load.
+          example: "PO-44821"
+        customer_rate:
+          type: number
+          format: double
+          description: Amount billed to the customer, in USD.
+          example: 2400.00
+        carrier_id:
+          type: string
+          description: OperFi carrier (vendor) ID from `GET /v1/carriers`. Preferred; lands resolved.
+          example: "3773785000000370055"
+        carrier_mc:
+          type: string
+          description: Carrier MC number, used when `carrier_id` is not supplied. At least one of `carrier_mc` / `carrier_usdot` is needed to resolve a carrier by value.
+          example: "123456"
+        carrier_usdot:
+          type: string
+          description: Carrier USDOT number, used when `carrier_id` is not supplied.
+          example: "987654"
+        carrier_rate:
+          type: number
+          format: double
+          description: Amount paid to the carrier, in USD.
+          example: 2000.00
+        carrier_factoring_invoice:
+          type: string
+          description: The carrier's factoring invoice number for this load.
+          example: "INV-55812"
+        load_rate_confirmation_number:
+          type: string
+          description: The rate confirmation number for this load.
+          example: "RC-77231"
+        payment_terms:
+          type: string
+          description: Optional. Payment terms for the load. If omitted, OperFi derives terms from the carrier on file.
+          example: "Net 30"
+        load_comments:
+          type: string
+          description: Optional free-text notes for the broker.
+          example: "Detention approved, see attached."
+        source_payload:
+          type: object
+          additionalProperties: true
+          description: Optional. Your original record for this load, stored verbatim. Useful for fields OperFi does not map and for the broker's reference during resolution.
+
+    CreateLoadsResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          description: One result per submitted load, in request order.
+          items:
+            $ref: '#/components/schemas/LoadResult'
+
+    LoadResult:
+      type: object
+      required: [source_load_ref, status]
+      properties:
+        source_load_ref:
+          type: string
+          description: Echoes the `source_load_ref` you sent, so you can correlate results.
+          example: "TMS-88231"
+        status:
+          type: string
+          enum: [received, duplicate, rejected]
+          description: |
+            - `received` — the load landed as a draft (possibly with warnings).
+            - `duplicate` — a draft for this `source_load_ref` already existed; the existing one is returned.
+            - `rejected` — the payload was malformed and no draft was created (see `errors`).
+          example: received
+        operfi_load_ref:
+          type: string
+          description: The OperFi load reference. Present for `received` and `duplicate`. Use it for document upload and status checks.
+          example: "DL-0001923"
+        warnings:
+          type: array
+          description: Soft issues the broker resolves in-portal. The draft still exists. Empty when none.
+          items:
+            $ref: '#/components/schemas/Issue'
+        errors:
+          type: array
+          description: Hard errors that prevented creation. Present only when `status` is `rejected`.
+          items:
+            $ref: '#/components/schemas/Issue'
+
+    LoadStatus:
+      type: object
+      required: [operfi_load_ref, source_load_ref, status]
+      properties:
+        operfi_load_ref:
+          type: string
+          example: "DL-0001923"
+        source_load_ref:
+          type: string
+          example: "TMS-88231"
+        status:
+          type: string
+          enum: [received, needs_attention, submitted]
+          description: |
+            - `received` — landed as a draft, no outstanding issues.
+            - `needs_attention` — the broker needs to resolve something (see `warnings`).
+            - `submitted` — the broker has submitted the load for factoring.
+          example: needs_attention
+        warnings:
+          type: array
+          description: Outstanding items the broker needs to resolve. Empty when none.
+          items:
+            $ref: '#/components/schemas/Issue'
+
+    DocumentUpload:
+      type: object
+      required: [document_type, files]
+      properties:
+        document_type:
+          type: string
+          enum: [rate_confirmation, bol, carrier_invoice, customer_invoice, other]
+          description: How OperFi should classify and route the uploaded files.
+        files:
+          type: array
+          minItems: 1
+          description: One or more files. Max 25 MB each. PDF, PNG, JPG, or TIFF.
+          items:
+            type: string
+            format: binary
+
+    DocumentUploadResult:
+      type: object
+      required: [operfi_load_ref, uploaded]
+      properties:
+        operfi_load_ref:
+          type: string
+          example: "DL-0001923"
+        uploaded:
+          type: integer
+          description: Number of files accepted.
+          example: 2
+        document_type:
+          type: string
+          example: rate_confirmation
+
+    CustomerList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Customer'
+        next_cursor:
+          type: string
+          nullable: true
+          description: Pass as `cursor` to fetch the next page. Null on the last page.
+          example: null
+
+    Customer:
+      type: object
+      required: [customer_id, name]
+      properties:
+        customer_id:
+          type: string
+          example: "3773785000000956013"
+        name:
+          type: string
+          example: "ABC Shipping LLC"
+        credit_status:
+          type: string
+          description: Always `approved` in this list (only approved customers are returned).
+          example: approved
+
+    CarrierList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Carrier'
+        next_cursor:
+          type: string
+          nullable: true
+          description: Pass as `cursor` to fetch the next page. Null on the last page.
+          example: null
+
+    Carrier:
+      type: object
+      required: [carrier_id, name]
+      properties:
+        carrier_id:
+          type: string
+          example: "3773785000000370055"
+        name:
+          type: string
+          example: "Brennan Trucking Inc"
+        mc:
+          type: string
+          nullable: true
+          example: "123456"
+        usdot:
+          type: string
+          nullable: true
+          example: "987654"
+        dnu:
+          type: boolean
+          description: True if this carrier is marked do-not-use for this client.
+          example: false
+
+    Issue:
+      type: object
+      required: [code, message]
+      description: A single warning or error.
+      properties:
+        code:
+          type: string
+          description: A stable machine-readable code.
+          example: customer_not_resolved
+        message:
+          type: string
+          description: A human-readable explanation.
+          example: No exact customer match; resolve in the OperFi portal.
+        field:
+          type: string
+          description: The input field the issue relates to, when applicable.
+          example: customer_name
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - unauthorized
+                - forbidden_client_ref
+                - validation_error
+                - customer_not_resolved
+                - carrier_not_resolved
+                - duplicate_load_ref
+                - load_not_found
+                - unsupported_document_type
+                - payload_too_large
+                - rate_limited
+                - internal_error
+              example: validation_error
+            message:
+              type: string
+              example: carrier_rate must be a positive number.
+            field:
+              type: string
+              description: The offending field, when applicable.
+              example: carrier_rate
+            request_id:
+              type: string
+              description: Echo this when contacting OperFi support.
+              example: req_01HZ8XK2P3
