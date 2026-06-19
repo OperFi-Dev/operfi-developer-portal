@@ -8,19 +8,104 @@ info:
     their paperwork, into OperFi in bulk. OperFi is the source of truth; this
     API is a one-way inbound feeder, not a two-way financial sync.
 
-    ## How it works
+    ## Base URLs
 
-    1. Push loads with `POST /v1/loads` (batch). Each load lands in OperFi as a
-       **draft**. Drafts are never auto-submitted.
-    2. Attach paperwork with `POST /v1/loads/{ref}/documents`.
-    3. The broker reviews, resolves anything unmatched, and submits inside the
-       OperFi portal.
-    4. Optionally poll `GET /v1/loads/{ref}` for the integration status.
+    | Environment | Base URL | Notes |
+    |---|---|---|
+    | Production | `https://operfi-broker-api.onrender.com/v1` | Live today. A friendly `https://api.operfi.com/v1` alias is planned. |
+    | Sandbox | `https://sandbox-api.operfi.com/v1` | Isolated test environment, coming in a later release. Until then you can integrate against production safely: loads land as drafts and are never auto-funded (a broker reviews and submits each one). |
 
-    Validation is **lenient on create, strict on submit.** A load with an
-    unmatched customer or carrier still lands as a draft; those come back as
-    `warnings`, and the broker resolves them in the portal. Only a malformed
-    payload is rejected.
+    ## Authentication
+
+    Send your API key as a bearer token on every request:
+
+    ```
+    Authorization: Bearer sk_live_xxxxxxxxxxxxxxxx
+    ```
+
+    Keys are environment-prefixed: `sk_live_` for production, `sk_test_` for the
+    sandbox. A key only works in its own environment. Identity (which OperFi
+    client you are) is always derived server-side from the key, never from the
+    request body.
+
+    ## Quickstart
+
+    The recommended flow: look up IDs, push loads, attach paperwork, check
+    status. The broker then reviews and submits inside OperFi.
+
+    **1. Look up the client's on-file customers and carriers** so you can tag
+    each load with OperFi IDs and it lands already resolved.
+
+    ```bash
+    curl https://operfi-broker-api.onrender.com/v1/customers \
+      -H "Authorization: Bearer sk_live_xxxx"
+    ```
+    ```json
+    {
+      "data": [
+        { "customer_id": "3773785000012087018", "name": "CUMBERLAND DIVERSIFIED METALS", "credit_status": "approved" }
+      ],
+      "next_cursor": null
+    }
+    ```
+
+    **2. Push loads** (always a batch, even for one). Each lands as a draft.
+
+    ```bash
+    curl -X POST https://operfi-broker-api.onrender.com/v1/loads \
+      -H "Authorization: Bearer sk_live_xxxx" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "loads": [{
+          "source_load_ref": "TMS-88231",
+          "customer_id": "3773785000012087018",
+          "carrier_id": "3773785000000370055",
+          "customer_reference_number": "PO-44821",
+          "customer_rate": 2400.00,
+          "carrier_rate": 2000.00,
+          "carrier_factoring_invoice": "INV-55812",
+          "load_rate_confirmation_number": "RC-77231"
+        }]
+      }'
+    ```
+    ```json
+    {
+      "results": [
+        { "source_load_ref": "TMS-88231", "status": "received", "operfi_load_ref": "DL-0001923", "warnings": [] }
+      ]
+    }
+    ```
+
+    You may send a customer/carrier by raw name or MC/USDOT instead of an ID. If
+    it doesn't match, the load still lands as a draft and the unresolved value
+    comes back in `warnings` for the broker to resolve. Re-sending the same
+    `source_load_ref` returns the existing draft with `status: "duplicate"`
+    (safe to retry).
+
+    **3. Attach paperwork** to a load (rate confirmation, BOL, invoice).
+
+    ```bash
+    curl -X POST https://operfi-broker-api.onrender.com/v1/loads/DL-0001923/documents \
+      -H "Authorization: Bearer sk_live_xxxx" \
+      -F "document_type=rate_confirmation" \
+      -F "files=@ratecon.pdf"
+    ```
+
+    **4. Check a load's integration status** at any time. This returns
+    integration status only (`received` / `needs_attention` / `submitted`),
+    never funding data.
+
+    ```bash
+    curl https://operfi-broker-api.onrender.com/v1/loads/DL-0001923 \
+      -H "Authorization: Bearer sk_live_xxxx"
+    ```
+
+    ## Validation: lenient on create, strict on submit
+
+    A load with an unmatched customer/carrier or missing rates still lands as a
+    draft; the gaps come back as `warnings`. Only a malformed payload (for
+    example, a missing `source_load_ref`) is `rejected`. The broker resolves any
+    warnings and submits the load inside OperFi.
 
     ## Identity
 
@@ -43,6 +128,23 @@ info:
       write must carry `OperFi-Client-Ref`, validated against your key's roster
       before any write occurs.
 
+    ## Errors
+
+    Every 4xx/5xx response uses one envelope:
+
+    ```json
+    {
+      "error": {
+        "code": "validation_error",
+        "message": "carrier_rate must be a positive number.",
+        "field": "carrier_rate",
+        "request_id": "req_01H..."
+      }
+    }
+    ```
+
+    Include the `request_id` when contacting OperFi support.
+
     ## Versioning
 
     The API is versioned in the path (`/v1`). Additive changes (new optional
@@ -62,10 +164,10 @@ info:
     email: integrations@operfi.com
 
 servers:
-  - url: https://api.operfi.com/v1
-    description: Production
+  - url: https://operfi-broker-api.onrender.com/v1
+    description: Production (live). A friendly api.operfi.com alias is planned.
   - url: https://sandbox-api.operfi.com/v1
-    description: Sandbox (safe to test against; never touches live funding)
+    description: Sandbox (test environment) — coming in a later release.
 
 security:
   - bearerAuth: []
