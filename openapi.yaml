@@ -13,7 +13,7 @@ info:
     | Environment | Base URL | Notes |
     |---|---|---|
     | Production | `https://operfi-broker-api.onrender.com/v1` | Live today. A friendly `https://api.operfi.com/v1` alias is planned. |
-    | Sandbox | `https://sandbox-api.operfi.com/v1` | Isolated test environment, coming in a later release. Until then you can integrate against production safely: loads land as drafts and are never auto-funded (a broker reviews and submits each one). |
+    | Sandbox | `https://sandbox-api.operfi.com/v1` | Isolated test environment. Available soon — contact OperFi for sandbox access. |
 
     ## Authentication
 
