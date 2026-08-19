@@ -12,8 +12,13 @@ info:
 
     | Environment | Base URL | Notes |
     |---|---|---|
-    | Production | `https://operfi-broker-api.onrender.com/v1` | Live today. A friendly `https://api.operfi.com/v1` alias is planned. |
-    | Sandbox | `https://sandbox-api.operfi.com/v1` | Isolated test environment. Available soon — contact OperFi for sandbox access. |
+    | Sandbox | `https://operfi-broker-api-sandbox.onrender.com/v1` | Live. Start here. Seeded test data, isolated storage, every outbound integration disabled. |
+    | Production | `https://operfi-broker-api.onrender.com/v1` | Live. Real loads on a real broker's account. |
+
+    Both environments run **the same code over the same request path**. The only
+    differences are where data is stored, that the sandbox cannot reach any
+    external system, and two sandbox-only endpoints that are marked as such.
+    Anything you certify against the sandbox behaves the same way in production.
 
     ## Authentication
 
@@ -28,38 +33,103 @@ info:
     client you are) is always derived server-side from the key, never from the
     request body.
 
+    ## Sandbox
+
+    The sandbox is a full copy of this API backed by its own isolated storage.
+    It never writes to OperFi's systems of record, never contacts a carrier,
+    a factoring company, or a payment processor, and cannot move money. Outbound
+    network calls are blocked at the process level rather than stubbed, so there
+    is no configuration mistake that can make a sandbox request reach production.
+
+    Ask OperFi for a sandbox key at `integrations@operfi.com`. You receive an
+    `sk_test_` key and, for Platform partners, an `OperFi-Client-Ref` value.
+
+    ### Seeded data
+
+    Every sandbox account is seeded with the same fixtures, so you can write
+    assertions against known values. `GET /v1/customers` and `GET /v1/carriers`
+    return exactly these.
+
+    **Customers**
+
+    | `customer_id` | Name | `fv_company_id` | Use it to test |
+    |---|---|---|---|
+    | `sbx_cust_1` | ACME DISTRIBUTION | `FV-SBX-1001` | The normal path: resolve by FactorView id |
+    | `sbx_cust_2` | GLOBEX LOGISTICS | `FV-SBX-1002` | Resolving by id or by name |
+    | `sbx_cust_3` | INITECH FREIGHT SERVICES | *(empty)* | A customer with **no** FactorView id, so you must fall back to `customer_name` |
+
+    **Carriers**
+
+    | `carrier_id` | Name | MC | USDOT | Pay terms | Use it to test |
+    |---|---|---|---|---|---|
+    | `sbx_carr_1` | BLUE RIDGE TRUCKING | `MC111111` | `1111111` | Net 30 | The normal path |
+    | `sbx_carr_2` | CASCADE CARRIERS | `MC222222` | `2222222` | Quick Pay | Resolving by MC or USDOT |
+    | `sbx_carr_3` | DELTA FREIGHT LINES | `MC333333` | `3333333` | Factoring Company | A carrier paid through a factor |
+    | `sbx_carr_4` | ECHO TRANSPORT | `MC444444` | `4444444` | Net 30 | A carrier flagged **do not use** (`dnu: true`) |
+
+    Useful cases these let you build deliberately: send `carrier_mc` and
+    `carrier_usdot` belonging to two *different* carriers to see a conflict go
+    unresolved, or send a `customer_fv_id` that does not exist to see
+    `customer_fv_id_not_found`.
+
+    ### Sandbox-only endpoints
+
+    - `POST /v1/sandbox/reset`: deletes your account's loads and re-seeds the
+      fixtures above. It touches only your own account. Call it between test
+      runs.
+    - `POST /v1/sandbox/loads/{ref}/advance`: moves a load to a later status so
+      you can exercise your polling logic. In production only a broker can do
+      this, from inside OperFi.
+
+    Both return `404` in production. They are the only endpoints that differ
+    between environments.
+
+    ### What the sandbox does not simulate
+
+    Sandbox loads never actually fund. There is no buyout, no wire, no reserve,
+    and no real credit decision: every seeded customer is credit-approved.
+    Customer and carrier matching runs against the seeded fixtures only, so it
+    exercises the same matcher your production traffic will hit, but over a much
+    smaller set of names.
+
     ## Quickstart
 
-    The recommended flow: look up IDs, push loads, attach paperwork, check
-    status. The broker then reviews and submits inside OperFi.
-
-    **1. Look up the client's on-file customers and carriers** so you can tag
-    each load with OperFi IDs and it lands already resolved.
+    Every command below runs against the **sandbox** and works as written once
+    you have a key. Responses are real, not illustrative. Platform partners send
+    `OperFi-Client-Ref`; Direct partners omit it.
 
     ```bash
-    curl https://operfi-broker-api.onrender.com/v1/customers \
-      -H "Authorization: Bearer sk_live_xxxx"
+    export OPERFI_KEY="sk_test_your_key_here"
+    export OPERFI_BASE="https://operfi-broker-api-sandbox.onrender.com/v1"
+    export OPERFI_CLIENT="SANDBOX-001"   # Platform partners only
+    ```
+
+    **1. Look up the client's customers and carriers.** Tag loads with these IDs
+    and they land already resolved. Note `fv_company_id`: when a customer has
+    one, it is the most reliable way to identify them.
+
+    ```bash
+    curl "$OPERFI_BASE/customers"       -H "Authorization: Bearer $OPERFI_KEY"       -H "OperFi-Client-Ref: $OPERFI_CLIENT"
     ```
     ```json
     {
       "data": [
-        { "customer_id": "3773785000012087018", "name": "CUMBERLAND DIVERSIFIED METALS", "credit_status": "approved" }
+        { "customer_id": "sbx_cust_1", "name": "ACME DISTRIBUTION", "fv_company_id": "FV-SBX-1001", "credit_status": "approved" },
+        { "customer_id": "sbx_cust_2", "name": "GLOBEX LOGISTICS", "fv_company_id": "FV-SBX-1002", "credit_status": "approved" },
+        { "customer_id": "sbx_cust_3", "name": "INITECH FREIGHT SERVICES", "fv_company_id": "", "credit_status": "approved" }
       ],
       "next_cursor": null
     }
     ```
 
-    **2. Push loads** (always a batch, even for one). Each lands as a draft.
+    **2. Push loads.** Always a batch, even for one. Each lands as a draft.
 
     ```bash
-    curl -X POST https://operfi-broker-api.onrender.com/v1/loads \
-      -H "Authorization: Bearer sk_live_xxxx" \
-      -H "Content-Type: application/json" \
-      -d '{
+    curl -X POST "$OPERFI_BASE/loads"       -H "Authorization: Bearer $OPERFI_KEY"       -H "OperFi-Client-Ref: $OPERFI_CLIENT"       -H "Content-Type: application/json"       -d '{
         "loads": [{
           "source_load_ref": "TMS-88231",
-          "customer_id": "3773785000012087018",
-          "carrier_id": "3773785000000370055",
+          "customer_fv_id": "FV-SBX-1001",
+          "carrier_mc": "MC111111",
           "customer_reference_number": "PO-44821",
           "customer_rate": 2400.00,
           "carrier_rate": 2000.00,
@@ -71,34 +141,72 @@ info:
     ```json
     {
       "results": [
-        { "source_load_ref": "TMS-88231", "status": "received", "operfi_load_ref": "DL-0001923", "warnings": [] }
+        { "source_load_ref": "TMS-88231", "status": "received", "operfi_load_ref": "4200000000001", "warnings": [] }
       ]
     }
     ```
 
-    You may send a customer/carrier by raw name or MC/USDOT instead of an ID. If
-    it doesn't match, the load still lands as a draft and the unresolved value
-    comes back in `warnings` for the broker to resolve. Re-sending the same
-    `source_load_ref` returns the existing draft with `status: "duplicate"`
-    (safe to retry).
+    `operfi_load_ref` is an opaque numeric string. Store it as text and do not
+    parse it. Use it for the next two calls.
 
-    **3. Attach paperwork** to a load (rate confirmation, BOL, invoice).
+    **3. Attach paperwork.**
 
     ```bash
-    curl -X POST https://operfi-broker-api.onrender.com/v1/loads/DL-0001923/documents \
-      -H "Authorization: Bearer sk_live_xxxx" \
-      -F "document_type=rate_confirmation" \
-      -F "files=@ratecon.pdf"
+    curl -X POST "$OPERFI_BASE/loads/4200000000001/documents"       -H "Authorization: Bearer $OPERFI_KEY"       -H "OperFi-Client-Ref: $OPERFI_CLIENT"       -F "document_type=rate_confirmation"       -F "files=@ratecon.pdf"
+    ```
+    ```json
+    { "operfi_load_ref": "4200000000001", "document_type": "rate_confirmation", "uploaded": 1 }
     ```
 
-    **4. Check a load's integration status** at any time. This returns
-    integration status only (`received` / `needs_attention` / `submitted`),
-    never funding data.
+    **4. Poll the load.** This returns integration status only, never funding
+    data. Outstanding items appear in `warnings` and clear as they are satisfied,
+    including by the documents you upload.
 
     ```bash
-    curl https://operfi-broker-api.onrender.com/v1/loads/DL-0001923 \
-      -H "Authorization: Bearer sk_live_xxxx"
+    curl "$OPERFI_BASE/loads/4200000000001"       -H "Authorization: Bearer $OPERFI_KEY"       -H "OperFi-Client-Ref: $OPERFI_CLIENT"
     ```
+    ```json
+    {
+      "operfi_load_ref": "4200000000001",
+      "source_load_ref": "TMS-88231",
+      "status": "needs_attention",
+      "warnings": [
+        { "code": "validation_error", "field": "documents", "message": "Carrier documents are required to submit." }
+      ]
+    }
+    ```
+
+    **5. Start over.** Sandbox only.
+
+    ```bash
+    curl -X POST "$OPERFI_BASE/sandbox/reset"       -H "Authorization: Bearer $OPERFI_KEY"       -H "OperFi-Client-Ref: $OPERFI_CLIENT"
+    ```
+
+    ## Identifying customers and carriers
+
+    You can identify a customer three ways. In precedence order:
+
+    1. **`customer_id`**: the OperFi ID from `GET /v1/customers`. Exact.
+    2. **`customer_fv_id`**: the FactorView Company ID, also returned by
+       `GET /v1/customers` as `fv_company_id`. Exact, and stable across OperFi
+       systems.
+    3. **`customer_name`**: matched against the client's on-file customers.
+
+    **An explicit identifier is never treated as a hint.** If you send
+    `customer_fv_id` and it does not match, the load still lands, but the
+    customer is left unresolved and you get `customer_fv_id_not_found`. We do
+    **not** fall back to `customer_name`, even when the name matches exactly.
+    Guessing a debtor after a failed ID lookup is how a load ends up billed to
+    the wrong company. Send `customer_fv_id` only when you have a real one, and
+    send `customer_name` otherwise.
+
+    Not every customer has a FactorView ID. When `fv_company_id` comes back
+    empty, use `customer_id` or `customer_name` for that customer.
+
+    Carriers work the same way: `carrier_id` is exact, otherwise `carrier_mc`
+    and/or `carrier_usdot` are matched. **If you send both an MC and a USDOT and
+    they belong to different carriers on file, the conflict is unresolved on
+    purpose** rather than picking one, and the load lands with the carrier blank.
 
     ## Validation: lenient on create, strict on submit
 
@@ -122,9 +230,9 @@ info:
 
     ## Authentication modes
 
-    - **Direct** — one API key maps to one OperFi client. The `OperFi-Client-Ref`
+    - **Direct**: one API key maps to one OperFi client. The `OperFi-Client-Ref`
       header is ignored.
-    - **Platform** — one API key maps to many clients (for TMS platforms). Every
+    - **Platform**: one API key maps to many clients (for TMS platforms). Every
       write must carry `OperFi-Client-Ref`, validated against your key's roster
       before any write occurs.
 
@@ -145,6 +253,32 @@ info:
 
     Include the `request_id` when contacting OperFi support.
 
+    ## Warning and error codes
+
+    Codes are stable. Branch on `code`, never on `message`.
+
+    **Warnings** - the draft still exists; a broker resolves these inside OperFi.
+
+    | Code | Field | What it means | What to do |
+    |---|---|---|---|
+    | `customer_not_resolved` | `customer_name` | The name did not match a credit-approved customer on file. | Send `customer_id` or `customer_fv_id`, or let the broker resolve it. |
+    | `customer_fv_id_not_found` | `customer_fv_id` | The FactorView ID matched nothing. **No name fallback is attempted.** | Re-check the ID against `GET /v1/customers`. Send `customer_name` instead if you do not hold a real ID. |
+    | `carrier_not_resolved` | `carrier_mc` | No carrier matched, or the MC and USDOT you sent point at two different carriers on file. | Send `carrier_id`, or send only the identifier you trust. |
+    | `validation_error` | varies | A field required *to submit* is still missing. The draft exists; it just cannot be submitted yet. | Supply the field, or upload the missing document. |
+
+    **Errors** - returned in the `error` envelope, or per-load under `errors`
+    when a load's `status` is `rejected`.
+
+    | Code | HTTP | What it means |
+    |---|---|---|
+    | `unauthorized` | 401 | Missing, invalid, or wrong-environment key. An `sk_test_` key on production, or an `sk_live_` key on the sandbox, lands here. |
+    | `forbidden_client_ref` | 403 | Your key is not authorized for the `OperFi-Client-Ref` you sent. |
+    | `load_not_found` | 404 | No load with that reference on this client's account. Also returned for a malformed reference. |
+    | `payload_too_large` | 413 | The upload exceeded the size limit. |
+    | `validation_error` | 422 | The request or an individual load was malformed. No draft was created for that load. |
+    | `rate_limited` | 429 | Slow down and retry after a pause. |
+    | `internal_error` | 500 | Something failed on our side. Safe to retry; quote `request_id` if it persists. |
+
     ## Versioning
 
     The API is versioned in the path (`/v1`). Additive changes (new optional
@@ -154,9 +288,9 @@ info:
 
     ## Getting a key
 
-    Keys are issued by OperFi during partner onboarding. You receive an
-    `sk_test_` key for the sandbox first; after a successful test, you receive
-    an `sk_live_` key for production. Keys are secret and can be rotated on
+    Email `integrations@operfi.com`. You receive an `sk_test_` key for the
+    sandbox immediately; once you have certified against it, you receive an
+    `sk_live_` key for production. Keys are secret and can be rotated on
     request. Platform partners have their authorized-client roster provisioned
     by OperFi.
   contact:
@@ -164,10 +298,10 @@ info:
     email: integrations@operfi.com
 
 servers:
+  - url: https://operfi-broker-api-sandbox.onrender.com/v1
+    description: Sandbox. Isolated test environment with seeded data. Start here.
   - url: https://operfi-broker-api.onrender.com/v1
-    description: Production (live). A friendly api.operfi.com alias is planned.
-  - url: https://sandbox-api.operfi.com/v1
-    description: Sandbox (test environment) — coming in a later release.
+    description: Production. Live loads on a real broker's account.
 
 security:
   - bearerAuth: []
@@ -179,6 +313,10 @@ tags:
     description: Attach paperwork to a load.
   - name: Reference data
     description: Look up the client's on-file customers and carriers, with OperFi IDs.
+  - name: Sandbox
+    description: >-
+      Sandbox-only controls for testing. These return 404 in production and are
+      the only endpoints that differ between environments.
 
 paths:
   /loads:
@@ -191,9 +329,15 @@ paths:
         for a single load, so you write one code path for any batch size.
 
         Each load lands as a **draft**. The response returns a per-load result
-        so one bad load never sinks the batch. Re-posting a load with a
-        `source_load_ref` you already sent returns the existing draft with
-        `status: "duplicate"` (idempotent), never a second draft.
+        so one bad load never sinks the batch.
+
+        **Idempotency is scoped to drafts.** Re-posting a `source_load_ref`
+        while its load is still a draft updates that draft and returns
+        `status: "duplicate"` with the same `operfi_load_ref`, so retries and
+        redeliveries are safe. Once the broker submits the load it stops being a
+        draft, and re-posting the same `source_load_ref` then creates a **new**
+        draft. Stop sending a load once you have seen it reach `submitted`, and
+        do not blind-replay historical loads.
 
         Up to 500 loads per request. Split larger batches client-side.
       parameters:
@@ -237,7 +381,7 @@ paths:
       operationId: getLoad
       description: |
         Returns the integration status of a load for debugging your
-        integration. Returns status only — never funding or payment data.
+        integration. Returns status only, never funding or payment data.
       parameters:
         - $ref: '#/components/parameters/LoadRef'
       responses:
@@ -363,6 +507,118 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /sandbox/reset:
+    post:
+      tags: [Sandbox]
+      summary: Reset your sandbox account
+      operationId: resetSandbox
+      description: |
+        Deletes every load on **your own** sandbox account and re-seeds the
+        standard customer and carrier fixtures. Other partners' sandbox accounts
+        are untouched.
+
+        Load references are never recycled: the reference counter deliberately
+        survives a reset, so a load created afterwards gets a fresh number rather
+        than repeating one you have already stored.
+
+        Returns 404 in production.
+      parameters:
+        - $ref: '#/components/parameters/ClientRef'
+      responses:
+        '200':
+          description: The account was reset.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [reset, loads_deleted]
+                properties:
+                  reset:
+                    type: boolean
+                    example: true
+                  loads_deleted:
+                    type: integer
+                    description: How many loads were removed.
+                    example: 3
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenClientRef'
+        '404':
+          description: This is not a sandbox service.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /sandbox/loads/{ref}/advance:
+    post:
+      tags: [Sandbox]
+      summary: Move a sandbox load to a later status
+      operationId: advanceSandboxLoad
+      description: |
+        Drives a sandbox load's status so you can exercise polling and
+        state-change handling without a human in the loop. In production only the
+        broker can move a load, from inside OperFi.
+
+        Nothing financial happens. Advancing to `submitted` does not fund, buy,
+        wire, or reserve anything; it only changes what `GET /v1/loads/{ref}`
+        reports.
+
+        `received` and `needs_attention` are both still drafts. Which one a load
+        reports depends on whether its required fields and documents are
+        complete, exactly as in production, so a load advanced to `received` may
+        immediately report `needs_attention` if something is still missing.
+
+        Returns 404 in production.
+      parameters:
+        - $ref: '#/components/parameters/LoadRef'
+        - $ref: '#/components/parameters/ClientRef'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [received, needs_attention, submitted]
+                  description: The status to move the load to.
+                  example: submitted
+      responses:
+        '200':
+          description: The load was moved.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operfi_load_ref, status]
+                properties:
+                  operfi_load_ref:
+                    type: string
+                    example: "4200000000001"
+                  status:
+                    type: string
+                    example: submitted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenClientRef'
+        '404':
+          $ref: '#/components/responses/LoadNotFound'
+        '422':
+          description: The requested status is not one of the allowed values.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
 
   securitySchemes:
@@ -393,7 +649,7 @@ components:
       description: The OperFi load reference (`operfi_load_ref`) returned when the load was created.
       schema:
         type: string
-        example: "DL-0001923"
+        example: "4200000000001"
     Limit:
       name: limit
       in: query
@@ -445,7 +701,7 @@ components:
           example:
             error:
               code: load_not_found
-              message: No load found with ref "DL-0001923".
+              message: No load found with ref "4200000000001".
               request_id: req_01HZ8XK2P5
     PayloadTooLarge:
       description: The request or a file exceeds the allowed size.
@@ -505,22 +761,36 @@ components:
       required: [source_load_ref]
       description: |
         A single load. `source_load_ref` is required and is the idempotency key.
-        Customer and carrier may be sent by OperFi ID (preferred — lands
-        resolved) or by raw value (name / MC / USDOT — resolved, or surfaced as
+        Customer and carrier may be sent by OperFi ID (preferred; lands
+        resolved) or by raw value (name / MC / USDOT), resolved or surfaced as
         a warning for the broker to resolve in-portal). Rates and references are
         needed to submit, but a load missing them still lands as a draft.
       properties:
         source_load_ref:
           type: string
-          description: Your own unique load or invoice number. Idempotency key. Re-sending the same value returns the existing draft.
+          description: >-
+            Your own unique load or invoice number, and the idempotency key.
+            Re-sending it while the load is still a draft returns that same
+            draft. Re-sending it after the broker has submitted the load creates
+            a new draft. See the endpoint description.
           example: "TMS-88231"
         customer_id:
           type: string
           description: OperFi customer ID from `GET /v1/customers`. Preferred; lands resolved.
           example: "3773785000000956013"
+        customer_fv_id:
+          type: string
+          description: >-
+            The customer's FactorView Company ID, returned as `fv_company_id` by
+            `GET /v1/customers`. Exact match only. If it does not match, the load
+            still lands but the customer is left unresolved with a
+            `customer_fv_id_not_found` warning -- OperFi does NOT fall back to
+            `customer_name`, even an exactly matching one. Send this only when
+            you hold a real value; not every customer has one.
+          example: "FV-SBX-1001"
         customer_name:
           type: string
-          description: Raw customer name, used when `customer_id` is not supplied. Resolved against the client's on-file customers; an unmatched name comes back as a warning.
+          description: Raw customer name, used when neither `customer_id` nor `customer_fv_id` is supplied. Resolved against the client's on-file customers; an unmatched name comes back as a warning.
           example: "ABC Shipping LLC"
         customer_reference_number:
           type: string
@@ -558,7 +828,13 @@ components:
           example: "RC-77231"
         payment_terms:
           type: string
-          description: Optional. Payment terms for the load. If omitted, OperFi derives terms from the carrier on file.
+          description: >-
+            Effectively read-only. Whenever a carrier resolves, OperFi
+            overwrites this with the pay terms on file for that carrier in the
+            client's account, and clears it if that carrier has none on file. A
+            value you send survives only when no carrier resolves at all. Carrier
+            pay terms are owned by the carrier record, not by the load; to change
+            them, change the carrier.
           example: "Net 30"
         load_comments:
           type: string
@@ -591,14 +867,14 @@ components:
           type: string
           enum: [received, duplicate, rejected]
           description: |
-            - `received` — the load landed as a draft (possibly with warnings).
-            - `duplicate` — a draft for this `source_load_ref` already existed; the existing one is returned.
-            - `rejected` — the payload was malformed and no draft was created (see `errors`).
+            - `received`: the load landed as a draft (possibly with warnings).
+            - `duplicate`: a draft for this `source_load_ref` already existed; the existing one is returned.
+            - `rejected`: the payload was malformed and no draft was created (see `errors`).
           example: received
         operfi_load_ref:
           type: string
           description: The OperFi load reference. Present for `received` and `duplicate`. Use it for document upload and status checks.
-          example: "DL-0001923"
+          example: "4200000000001"
         warnings:
           type: array
           description: Soft issues the broker resolves in-portal. The draft still exists. Empty when none.
@@ -616,7 +892,7 @@ components:
       properties:
         operfi_load_ref:
           type: string
-          example: "DL-0001923"
+          example: "4200000000001"
         source_load_ref:
           type: string
           example: "TMS-88231"
@@ -624,9 +900,9 @@ components:
           type: string
           enum: [received, needs_attention, submitted]
           description: |
-            - `received` — landed as a draft, no outstanding issues.
-            - `needs_attention` — the broker needs to resolve something (see `warnings`).
-            - `submitted` — the broker has submitted the load for factoring.
+            - `received`: landed as a draft, no outstanding issues.
+            - `needs_attention`: the broker needs to resolve something (see `warnings`).
+            - `submitted`: the broker has submitted the load for factoring.
           example: needs_attention
         warnings:
           type: array
@@ -656,7 +932,7 @@ components:
       properties:
         operfi_load_ref:
           type: string
-          example: "DL-0001923"
+          example: "4200000000001"
         uploaded:
           type: integer
           description: Number of files accepted.
@@ -689,6 +965,14 @@ components:
         name:
           type: string
           example: "ABC Shipping LLC"
+        fv_company_id:
+          type: string
+          description: >-
+            The customer's FactorView Company ID, or an empty string when they do
+            not have one. Pass it back as `customer_fv_id` on a load to identify
+            this customer exactly. Expect it to be empty for a meaningful share
+            of customers; fall back to `customer_id` or `customer_name` then.
+          example: "FV-SBX-1001"
         credit_status:
           type: string
           description: Always `approved` in this list (only approved customers are returned).
