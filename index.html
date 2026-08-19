@@ -9,6 +9,34 @@
   <style>
     body { margin: 0; padding: 0; font-family: 'Inter', system-ui, sans-serif; }
     redoc { display: block; }
+
+    /* Redoc breaks long tokens anywhere by default, which splits identifiers
+       mid-word in tables (customer_id rendering as "custom / er_id"). An API
+       reference must never show a field name a reader has to reassemble, and
+       must never invite a bad copy-paste. Keep identifiers whole. */
+    redoc code,
+    redoc span[class*="token"],
+    redoc td code {
+      word-break: keep-all;
+      overflow-wrap: normal;
+      white-space: nowrap;
+    }
+
+    /* With identifiers unbreakable, a wide markdown table must scroll rather
+       than crush its columns. Applies only to prose tables in the description,
+       not to Redoc's own schema rendering. */
+    redoc .redoc-markdown table {
+      display: block;
+      width: fit-content;
+      max-width: 100%;
+      overflow-x: auto;
+    }
+
+    /* Fenced code blocks still need to wrap normally; only inline tokens are
+       protected above. */
+    redoc pre code {
+      white-space: pre;
+    }
   </style>
 </head>
 <body>

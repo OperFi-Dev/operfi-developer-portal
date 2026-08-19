@@ -60,12 +60,12 @@ info:
 
     **Carriers**
 
-    | `carrier_id` | Name | MC | USDOT | Pay terms | Use it to test |
-    |---|---|---|---|---|---|
-    | `sbx_carr_1` | BLUE RIDGE TRUCKING | `MC111111` | `1111111` | Net 30 | The normal path |
-    | `sbx_carr_2` | CASCADE CARRIERS | `MC222222` | `2222222` | Quick Pay | Resolving by MC or USDOT |
-    | `sbx_carr_3` | DELTA FREIGHT LINES | `MC333333` | `3333333` | Factoring Company | A carrier paid through a factor |
-    | `sbx_carr_4` | ECHO TRANSPORT | `MC444444` | `4444444` | Net 30 | A carrier flagged **do not use** (`dnu: true`) |
+    | `carrier_id` | Name | MC / USDOT | Pay terms | Use it to test |
+    |---|---|---|---|---|
+    | `sbx_carr_1` | BLUE RIDGE TRUCKING | `MC111111` / `1111111` | Net 30 | The normal path |
+    | `sbx_carr_2` | CASCADE CARRIERS | `MC222222` / `2222222` | Quick Pay | Resolving by MC or USDOT |
+    | `sbx_carr_3` | DELTA FREIGHT LINES | `MC333333` / `3333333` | Factoring Company | A carrier paid through a factor |
+    | `sbx_carr_4` | ECHO TRANSPORT | `MC444444` / `4444444` | Net 30 | Flagged **do not use** (`dnu: true`) |
 
     Useful cases these let you build deliberately: send `carrier_mc` and
     `carrier_usdot` belonging to two *different* carriers to see a conflict go
