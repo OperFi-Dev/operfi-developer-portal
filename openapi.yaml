@@ -162,6 +162,11 @@ info:
     data. Outstanding items appear in `warnings` and clear as they are satisfied,
     including by the documents you upload.
 
+    **5. Learn when the debtor pays.** Poll `GET /v1/events` from the last
+    `next_cursor` you stored. Settlement events tell you whether a load was paid
+    in full, short paid, or charged back, and for how much. This is the only
+    place financial outcomes appear.
+
     ```bash
     curl "$OPERFI_BASE/loads/4200000000001"       -H "Authorization: Bearer $OPERFI_KEY"       -H "OperFi-Client-Ref: $OPERFI_CLIENT"
     ```
@@ -224,9 +229,10 @@ info:
 
     ## What this API does not do
 
-    It does not send funding or payment data back to your system. There are no
-    outbound webhooks and no payment callbacks. `GET /v1/loads/{ref}` returns
-    integration status only, never financial data.
+    There are no outbound webhooks and no payment callbacks. Settlement data is
+    delivered by polling `GET /v1/events` — OperFi never posts to an endpoint you
+    host. `GET /v1/loads/{ref}` still returns integration status only: money lives
+    on the event feed, not on the load.
 
     ## Authentication modes
 
@@ -313,6 +319,10 @@ tags:
     description: Attach paperwork to a load.
   - name: Reference data
     description: Look up the client's on-file customers and carriers, with OperFi IDs.
+  - name: Settlement
+    description: >-
+      Learn when a debtor paid a load you pushed, and what actually happened to
+      the money.
   - name: Sandbox
     description: >-
       Sandbox-only controls for testing. These return 404 in production and are
@@ -507,6 +517,63 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /events:
+    get:
+      tags: [Settlement]
+      summary: Poll settlement events for loads you pushed
+      operationId: listEvents
+      description: |
+        An append-only log of what happened to the money on loads you pushed.
+        You poll it; OperFi never posts to an endpoint you host.
+
+        Events are immutable and ordered by `seq`, a monotonically increasing
+        integer. Store the `next_cursor` you receive and send it back as
+        `cursor` on your next call to get only what is new. A correction is
+        always a NEW event, never an edit to one you have already seen.
+
+        **Scope.** One broker per request, exactly like `/v1/customers` and
+        `/v1/carriers`. In Platform mode, poll once per client ref.
+
+        **Two event types.**
+        - `load.settled` — the receivable resolved. `disposition` says how:
+          `paid_in_full`, `short_paid`, or `charged_back`. A load that ages out
+          unpaid and is charged back to reserve is a `load.settled` carrying
+          `charged_back`: there was never a payment to retract.
+        - `load.settlement_reversed` — a settlement you were already told about
+          is being retracted, typically a returned check or a later chargeback.
+          `reverses_seq` points at the `seq` of the `load.settled` event it
+          undoes. A load can settle, reverse, and settle again.
+
+        **`source_load_ref` is not unique in this feed.** Re-posting a
+        `source_load_ref` after its load has left Draft creates a second,
+        genuinely separate OperFi load, and both can settle. Key your records on
+        `operfi_load_ref`; treat `source_load_ref` as a label, not an identity.
+
+        **Timing.** Settlement is a daily-cadence fact and the feed is refreshed
+        hourly, so polling more often returns nothing new. Events appear only
+        after a debtor actually pays, typically weeks after a load is submitted.
+      parameters:
+        - $ref: '#/components/parameters/ClientRef'
+        - $ref: '#/components/parameters/EventCursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A page of events, oldest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventList'
+        '400':
+          $ref: '#/components/responses/CursorTooOld'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenClientRef'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /sandbox/reset:
     post:
       tags: [Sandbox]
@@ -668,6 +735,22 @@ components:
       schema:
         type: string
 
+    EventCursor:
+      name: cursor
+      in: query
+      required: false
+      description: >-
+        The `next_cursor` from your previous `/events` call. Unlike the opaque
+        cursor used elsewhere in this API, this is a monotonically increasing
+        integer sequence number: you receive events whose `seq` is strictly
+        greater than it. Omit it, or send `0`, to read from the beginning — `0`
+        is always valid no matter how far the log has been trimmed.
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+        example: 10482
+
   responses:
     Unauthorized:
       description: Missing or invalid API key.
@@ -692,6 +775,24 @@ components:
               message: client_ref "ACME-LOGISTICS-001" is not authorized for this key.
               field: OperFi-Client-Ref
               request_id: req_01HZ8XK2P4
+    CursorTooOld:
+      description: >-
+        The `cursor` you sent is older than the retained event window, so the
+        events between it and the oldest retained event no longer exist and
+        cannot be replayed. Restart from `cursor=0` and reconcile by
+        `operfi_load_ref`. Sending `cursor=0` never produces this error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: cursor_too_old
+              message: >-
+                That cursor is older than the retained event window. Restart from
+                cursor=0 and reconcile by operfi_load_ref.
+              field: cursor
+              request_id: req_01HZ8XK2P9
     LoadNotFound:
       description: No load exists with that reference for this client.
       content:
@@ -1032,6 +1133,112 @@ components:
           type: string
           description: The input field the issue relates to, when applicable.
           example: customer_name
+
+    EventList:
+      type: object
+      required: [events, next_cursor, has_more]
+      properties:
+        events:
+          type: array
+          description: Events with `seq` greater than your cursor, oldest first.
+          items:
+            $ref: '#/components/schemas/SettlementEvent'
+        next_cursor:
+          type: integer
+          format: int64
+          description: >-
+            Send this as `cursor` on your next call. Unchanged from what you sent
+            when the page is empty, so an idle feed never moves you backwards.
+          example: 10611
+        has_more:
+          type: boolean
+          description: >-
+            True when more events were available than `limit` allowed. Keep
+            polling immediately while this is true; otherwise wait for the next
+            hourly refresh.
+          example: false
+
+    SettlementEvent:
+      type: object
+      required: [seq, type, operfi_load_ref, disposition, occurred_at, recorded_at]
+      description: >-
+        Immutable. All money fields are decimal STRINGS, never JSON numbers, so
+        that cent values survive a round trip through languages that would
+        otherwise parse them as floats.
+      properties:
+        seq:
+          type: integer
+          format: int64
+          description: Monotonically increasing. Your cursor position.
+          example: 10482
+        type:
+          type: string
+          enum: [load.settled, load.settlement_reversed]
+          description: >-
+            `load.settled` — the receivable resolved. `load.settlement_reversed`
+            — a settlement you were already told about is being retracted.
+          example: load.settled
+        operfi_load_ref:
+          type: string
+          description: The load this event is about. Key your records on this.
+          example: "4200000000001"
+        source_load_ref:
+          type: string
+          description: >-
+            Your own reference from when you pushed the load. NOT unique in this
+            feed — see the endpoint description. Empty if the load did not come
+            from you.
+          example: TMS-88231
+        disposition:
+          type: string
+          enum: [paid_in_full, short_paid, charged_back]
+          description: >-
+            What actually happened. `short_paid` means the debtor paid less than
+            the invoice and the difference was charged to reserve. `charged_back`
+            means the receivable was recoursed rather than collected.
+          example: short_paid
+        invoice_amount:
+          type: string
+          description: The receivable's face value. Present on `load.settled`.
+          example: "1778.33"
+        amount_settled:
+          type: string
+          description: >-
+            What the debtor actually paid. Present on `load.settled`. Zero on a
+            charged-back load that was never paid.
+          example: "1776.81"
+        variance:
+          type: string
+          description: >-
+            `amount_settled` minus `invoice_amount`. Negative on a short pay,
+            positive on an overpayment, `"0.00"` on a clean settlement.
+          example: "-1.52"
+        amount_reversed:
+          type: string
+          description: >-
+            Present on `load.settlement_reversed` only. The amount being
+            retracted — the settled amount, not the invoice face value.
+          example: "1776.81"
+        reverses_seq:
+          type: integer
+          format: int64
+          description: >-
+            Present on `load.settlement_reversed` only. The `seq` of the
+            `load.settled` event this retracts. Always points at a settlement,
+            never at another reversal.
+          example: 10482
+        occurred_at:
+          type: string
+          format: date-time
+          description: >-
+            When the money moved, in UTC. Reconcile on this. It can be earlier
+            than `recorded_at` by hours or days.
+          example: "2026-08-14T16:00:00Z"
+        recorded_at:
+          type: string
+          format: date-time
+          description: When OperFi appended the event, in UTC. Ordering follows `seq`, not this.
+          example: "2026-08-15T03:12:00Z"
 
     ErrorResponse:
       type: object
