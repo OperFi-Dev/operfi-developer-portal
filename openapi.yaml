@@ -92,6 +92,12 @@ info:
     exercises the same matcher your production traffic will hit, but over a much
     smaller set of names.
 
+    Settlement is the exception. No money moves, but you can emit a real
+    settlement event on demand — paid in full, short paid, charged back, or a
+    reversal of a settlement you were already told about — so you can test the
+    code that handles one without waiting for a debtor. See
+    `POST /sandbox/loads/{ref}/advance`.
+
     ## Quickstart
 
     Every command below runs against the **sandbox** and works as written once
@@ -630,14 +636,48 @@ paths:
         state-change handling without a human in the loop. In production only the
         broker can move a load, from inside OperFi.
 
-        Nothing financial happens. Advancing to `submitted` does not fund, buy,
-        wire, or reserve anything; it only changes what `GET /v1/loads/{ref}`
-        reports.
-
         `received` and `needs_attention` are both still drafts. Which one a load
         reports depends on whether its required fields and documents are
         complete, exactly as in production, so a load advanced to `received` may
         immediately report `needs_attention` if something is still missing.
+
+        Advancing to `submitted` does not fund, buy, wire, or reserve anything;
+        it only changes what `GET /v1/loads/{ref}` reports.
+
+        ## Simulating a settlement
+
+        `settled` and `reversed` emit real events onto your `GET /v1/events`
+        feed, so you can test the code that HANDLES a settlement without
+        waiting for a debtor to pay.
+
+        ```json
+        {"status": "settled", "disposition": "short_paid"}
+        {"status": "reversed"}
+        ```
+
+        `settled` requires a `disposition` — `paid_in_full`, `short_paid`, or
+        `charged_back` — and emits a `load.settled`. `reversed` emits a
+        `load.settlement_reversed` retracting the settlement before it, which
+        is the case worth testing hardest: your integration has to un-mark a
+        load it already reported as paid.
+
+        **Settle only a load you have advanced to `submitted`.** A load that
+        was never funded cannot settle, so the sandbox refuses it rather than
+        teaching you a lifecycle production does not produce. `reversed` on a
+        load with no settlement is refused for the same reason.
+
+        Amounts derive from the `customer_rate` you submitted, so your
+        reconciliation runs against your own figure: `paid_in_full` settles it
+        exactly, `short_paid` deducts a small remainder to reserve, and
+        `charged_back` settles nothing. A load pushed without a rate falls back
+        to a usable invoice amount.
+
+        You can settle, reverse, and settle the same load again. Events are
+        immutable, so each is a new entry rather than an edit — exactly as in
+        production.
+
+        These events are built by the same code that emits real ones, so the
+        shape you certify against here is the shape production sends.
 
         Returns 404 in production.
       parameters:
@@ -653,12 +693,23 @@ paths:
               properties:
                 status:
                   type: string
-                  enum: [received, needs_attention, submitted]
-                  description: The status to move the load to.
-                  example: submitted
+                  enum: [received, needs_attention, submitted, settled, reversed]
+                  description: >-
+                    The status to move the load to. `settled` and `reversed`
+                    emit settlement events onto your /events feed rather than
+                    changing what GET /loads/{ref} reports.
+                  example: settled
+                disposition:
+                  type: string
+                  enum: [paid_in_full, short_paid, charged_back]
+                  description: >-
+                    Required when status is `settled`; ignored otherwise. A
+                    `reversed` call is always a chargeback of the settlement
+                    before it.
+                  example: short_paid
       responses:
         '200':
-          description: The load was moved.
+          description: The load was moved, or a settlement event was emitted.
           content:
             application/json:
               schema:
@@ -670,7 +721,24 @@ paths:
                     example: "4200000000001"
                   status:
                     type: string
-                    example: submitted
+                    example: settled
+                  event:
+                    type: object
+                    description: >-
+                      Present only for `settled` and `reversed`. Identifies the
+                      event now waiting on your /events feed.
+                    properties:
+                      seq:
+                        type: integer
+                        format: int64
+                        example: 3
+                      type:
+                        type: string
+                        enum: [load.settled, load.settlement_reversed]
+                        example: load.settled
+                      disposition:
+                        type: string
+                        example: short_paid
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
