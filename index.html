@@ -4,7 +4,16 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>OperFi Partner API</title>
-  <link rel="icon" href="data:," />
+  <!-- The OperFi mark on a charcoal tile. A tile rather than the logo as-is
+       because a favicon is judged at 16px: the logo's grey frame turns to mush
+       at that size, and a transparent mark disappears against dark browser
+       chrome. Replaces a blank `data:,` icon that existed only to stop the
+       browser requesting /favicon.ico and 404ing. -->
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+  <meta name="theme-color" content="#1d1d1f" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <style>
     body { margin: 0; padding: 0; font-family: 'Inter', system-ui, sans-serif; }
