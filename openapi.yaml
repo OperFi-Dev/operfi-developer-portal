@@ -326,6 +326,10 @@ tags:
     description: Attach paperwork to a load.
   - name: Reference data
     description: Look up the client's on-file customers and carriers, with OperFi IDs.
+  - name: Carrier onboarding
+    description: >-
+      Start a carrier's OperFi setup from inside your own product, so your
+      broker never has to set the same carrier up twice.
   - name: Settlement
     description: >-
       Learn when a debtor paid a load you pushed, and what actually happened to
@@ -545,6 +549,96 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /carriers/invite:
+    post:
+      tags: [Carrier onboarding]
+      summary: Mint a carrier setup link
+      operationId: inviteCarrier
+      description: |
+        Returns a one-time URL that takes a carrier straight into OperFi's
+        setup form, already bound to your broker client. Show it in your own
+        UI: as a button next to an unknown carrier, in the email your product
+        already sends, or as a QR code.
+
+        When the carrier finishes, they appear on `GET /v1/carriers` and a
+        `carrier.onboarded` event lands on `/v1/events`. You never poll a
+        separate status.
+
+        ### You do not send the broker, and you cannot
+
+        The broker is resolved server-side from your API key plus
+        `OperFi-Client-Ref` and sealed into the link. A `broker_id` in the body
+        is ignored, not honoured. This is the whole point of the endpoint: the
+        legacy setup form carried broker name, MC and email as editable URL
+        parameters, so a crafted link could route a carrier's banking details
+        to the wrong broker while the form displayed the forged values as if
+        they were verified.
+
+        ### 🚨 Not idempotent, on purpose
+
+        Every call mints a NEW link. Links already issued stay valid until they
+        are used, revoked, or expire, so calling twice does not invalidate the
+        first one and does not create a duplicate carrier.
+
+        Cache on `expires_at` rather than re-minting on every render. Links
+        last 30 days by default.
+
+        ### Which form
+
+        - `pay` (default) — banking and payment details. The common case, for a
+          carrier your broker has already agreed to haul with.
+        - `full` — the complete carrier packet, including the agreement.
+
+        ### Enablement
+
+        Returns `404 not_found` when carrier onboarding is not enabled for your
+        account. The check runs after authentication, so an unauthenticated
+        caller cannot use it to discover whether the feature exists.
+      parameters:
+        - $ref: '#/components/parameters/ClientRef'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CarrierInviteRequest'
+      responses:
+        '200':
+          description: A setup link, valid until `expires_at`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CarrierInvite'
+        '400':
+          description: >-
+            `invalid_carrier_usdot` (missing or non-numeric) or `invalid_form`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForbiddenClientRef'
+        '404':
+          description: Carrier onboarding is not enabled for your account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: >-
+            `link_unavailable`. OperFi could not sign a link right now and
+            deliberately did not issue an unsigned one. Safe to retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /events:
     get:
       tags: [Settlement]
@@ -562,7 +656,12 @@ paths:
         **Scope.** One broker per request, exactly like `/v1/customers` and
         `/v1/carriers`. In Platform mode, poll once per client ref.
 
-        **Two event types.**
+        **Branch on `type`.** There are four, and more may be added. Ignore
+        a `type` you do not recognise rather than failing the batch; your
+        cursor must still advance past it.
+
+        *Money on a load you pushed:*
+
         - `load.settled` — the receivable resolved. `disposition` says how:
           `paid_in_full`, `short_paid`, or `charged_back`. A load that ages out
           unpaid and is charged back to reserve is a `load.settled` carrying
@@ -571,6 +670,28 @@ paths:
           is being retracted, typically a returned check or a later chargeback.
           `reverses_seq` points at the `seq` of the `load.settled` event it
           undoes. A load can settle, reverse, and settle again.
+        - `carrier.paid` — the carrier on that load has been paid, so you can
+          close the load out on your side. Carries who was paid, how much, the
+          pay terms and the reference numbers.
+
+        🚨 **There is no reversal event for `carrier.paid`, and that is
+        deliberate.** Because the feed carries `load.settlement_reversed` for
+        debtor settlements, symmetry is a reasonable thing to expect. Carrier
+        payment reversals are rare one-offs that OperFi handles directly with
+        the broker and the carrier; they are not published here. Do not build a
+        reconciliation that waits for a `carrier.paid` to be retracted. It will
+        not be.
+
+        *A carrier's setup:*
+
+        - `carrier.onboarded` — a carrier finished the setup form and is now on
+          file for that broker. The `carrier` block mirrors `GET /v1/carriers`
+          exactly, so your existing parser handles it unchanged. This event
+          carries **no `operfi_load_ref`**: a carrier is not a load. The event
+          says "this changed"; `GET /v1/carriers` stays the source of truth.
+
+        You get `carrier.onboarded` for any broker on your roster, whether or
+        not the setup started from your own `POST /v1/carriers/invite` call.
 
         **`source_load_ref` is not unique in this feed.** Re-posting a
         `source_load_ref` after its load has left Draft creates a second,
@@ -580,6 +701,14 @@ paths:
         **Timing.** Settlement is a daily-cadence fact and the feed is refreshed
         hourly, so polling more often returns nothing new. Events appear only
         after a debtor actually pays, typically weeks after a load is submitted.
+
+        `carrier.paid` has the same precondition as `load.settled`: it cannot
+        be emitted until the load's invoice has resolved on OperFi's side. A
+        load whose invoice never resolves produces neither event.
+
+        `carrier.onboarded` is prompt — it follows the carrier finishing the
+        form, not any daily cycle. It still arrives on your normal cursor
+        poll; there is no webhook and no callback for any event type.
       parameters:
         - $ref: '#/components/parameters/ClientRef'
         - $ref: '#/components/parameters/EventCursor'
@@ -1262,9 +1391,17 @@ components:
       properties:
         events:
           type: array
-          description: Events with `seq` greater than your cursor, oldest first.
+          description: >-
+            Events with `seq` greater than your cursor, oldest first. Mixed
+            types share one ordered feed -- branch on `type`, and ignore a type
+            you do not recognise rather than failing the batch.
           items:
-            $ref: '#/components/schemas/SettlementEvent'
+            oneOf:
+              - $ref: '#/components/schemas/SettlementEvent'
+              - $ref: '#/components/schemas/CarrierPaidEvent'
+              - $ref: '#/components/schemas/CarrierOnboardedEvent'
+            discriminator:
+              propertyName: type
         next_cursor:
           type: integer
           format: int64
@@ -1279,6 +1416,172 @@ components:
             polling immediately while this is true; otherwise wait for the next
             hourly refresh.
           example: false
+
+    CarrierPaidEvent:
+      type: object
+      required: [seq, type, operfi_load_ref, carrier, amount, recorded_at]
+      description: >-
+        The carrier on a load you pushed has been paid. Money fields are
+        decimal STRINGS, never JSON numbers.
+      properties:
+        seq:
+          type: integer
+          format: int64
+          example: 4630
+        type:
+          type: string
+          enum: [carrier.paid]
+          example: carrier.paid
+        operfi_load_ref:
+          type: string
+          description: Key on this, not on `source_load_ref`.
+          example: "3773785000015170056"
+        source_load_ref:
+          type: string
+          description: Your own reference, echoed back. A label, not an identity.
+          example: "ABC-99812"
+        carrier:
+          type: object
+          description: Who was paid.
+          properties:
+            carrier_name:
+              type: string
+              description: Always present.
+              example: WESTPHAL TRUCKING LLC
+            usdot:
+              type: string
+              description: >-
+                May be an empty string. A small number of carrier records carry
+                no USDOT; it is empty rather than wrong. Do not treat an empty
+                USDOT as a malformed event.
+              example: "2054386"
+        amount:
+          type: string
+          description: Paid to the carrier, USD, a decimal string.
+          example: "4700.00"
+        payment_terms:
+          type: string
+          description: The carrier's pay terms on this broker's account.
+          example: Standard Net 30
+        occurred_at:
+          type: string
+          description: >-
+            The same instant as `payment_recorded_on`, in the shape every event
+            type uses. Read this one if you have a single generic handler.
+            Omitted on the rare event whose date will not parse, exactly as for
+            settlement events -- do not assume it is always present.
+          example: "2026-09-18T00:00:00Z"
+        payment_recorded_on:
+          type: string
+          description: >-
+            🚨 The date OperFi RECORDED the payment. It is not a bank
+            settlement date and OperFi makes no claim about when funds left an
+            account. If your UI tells a carrier "paid on the 18th" based on
+            this field you are making a stronger claim than we are. "Payment
+            recorded 18 Sep" is accurate; "paid 18 Sep" may not be.
+          example: "2026-09-18"
+        recorded_at:
+          type: string
+          format: date-time
+          description: >-
+            When OperFi appended this event to your feed. Nothing to do with
+            the payment. Do not confuse it with `payment_recorded_on`.
+          example: "2026-09-20T18:04:11Z"
+        references:
+          type: object
+          description: >-
+            Reference numbers carried through from the payment. Any of these
+            may be an empty string.
+          properties:
+            payment_reference:
+              type: string
+              example: "Ref: 260918-2054386-7544:ALL AMERICAN FREIGHT"
+            vendor_ref:
+              type: string
+              example: "15754"
+            po:
+              type: string
+              example: TRAN101924
+            client_invoice:
+              type: string
+              example: "5689"
+
+    CarrierOnboardedEvent:
+      type: object
+      required: [seq, type, carrier, recorded_at]
+      description: >-
+        A carrier finished setup and is now on file for that broker. Carries no
+        `operfi_load_ref`: a carrier is not a load.
+      properties:
+        seq:
+          type: integer
+          format: int64
+          example: 4488
+        type:
+          type: string
+          enum: [carrier.onboarded]
+          example: carrier.onboarded
+        carrier:
+          $ref: '#/components/schemas/Carrier'
+        form:
+          type: string
+          enum: [pay, full]
+          description: Which setup form the carrier completed.
+          example: pay
+        occurred_at:
+          type: string
+          format: date-time
+          example: "2026-09-20T17:41:02Z"
+        recorded_at:
+          type: string
+          format: date-time
+          description: When OperFi appended this event to your feed.
+          example: "2026-09-20T17:41:02Z"
+
+    CarrierInviteRequest:
+      type: object
+      required: [carrier_usdot]
+      properties:
+        carrier_usdot:
+          type: string
+          description: >-
+            The carrier's USDOT, digits only. Required. This is the only thing
+            you send that identifies the carrier.
+          example: "2054386"
+        form:
+          type: string
+          enum: [pay, full]
+          default: pay
+          description: >-
+            `pay` collects banking and payment details. `full` collects the
+            complete carrier packet including the agreement.
+          example: pay
+
+    CarrierInvite:
+      type: object
+      required: [setup_url, form, carrier_usdot, expires_at]
+      properties:
+        setup_url:
+          type: string
+          description: >-
+            Show this to the carrier. It is bound to your broker client and to
+            this USDOT, and it is signed -- editing any part of it invalidates
+            it rather than changing who the carrier is set up under.
+          example: "https://operfi-broker-api.onrender.com/vendor-setup/?t=eyJ...."
+        form:
+          type: string
+          enum: [pay, full]
+          example: pay
+        carrier_usdot:
+          type: string
+          example: "2054386"
+        expires_at:
+          type: string
+          format: date-time
+          description: >-
+            Cache against this rather than calling again on every render. 30
+            days from issue by default.
+          example: "2026-10-20T17:41:02Z"
 
     SettlementEvent:
       type: object
