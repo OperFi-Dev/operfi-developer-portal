@@ -77,7 +77,8 @@ info:
     - `POST /v1/sandbox/reset`: deletes your account's loads and re-seeds the
       fixtures above. It touches only your own account. Call it between test
       runs.
-    - `POST /v1/sandbox/loads/{ref}/advance`: moves a load to a later status so
+    - `POST /v1/sandbox/loads/{ref}/advance`: moves a load to a later status, and
+      triggers settlement and carrier-payment events on demand, so
       you can exercise your polling logic. In production only a broker can do
       this, from inside OperFi.
 
@@ -827,6 +828,33 @@ paths:
         immutable, so each is a new entry rather than an edit — exactly as in
         production.
 
+        ## Simulating a carrier payment
+
+        `carrier_paid` emits a real `carrier.paid` onto your feed, so you can
+        test closing a load out without waiting for an actual carrier
+        remittance.
+
+        ```json
+        {"status": "carrier_paid"}
+        ```
+
+        No `disposition`: a carrier payment either happened or it did not.
+
+        **Pay only a load you have advanced to `purchased`.** A load that was
+        never funded has no carrier payment, so the sandbox refuses it.
+
+        The amount comes from the `carrier_rate` you submitted, and the carrier
+        block from the carrier the load resolved to — so `vendor_name` arrives
+        packed as `NAME | USDOT` and is split exactly as production splits it.
+        A load pushed without a carrier rate falls back to a usable amount.
+
+        You can pay the same load more than once. Each call is a distinct
+        payment carrying its own `payment_reference`, not an idempotent
+        repeat, so you can exercise a handler that sees two.
+
+        Remember there is no reversal event for `carrier.paid`. Nothing in the
+        sandbox will retract one, because nothing in production will either.
+
         These events are built by the same code that emits real ones, so the
         shape you certify against here is the shape production sends.
 
@@ -844,11 +872,11 @@ paths:
               properties:
                 status:
                   type: string
-                  enum: [received, needs_attention, submitted, settled, reversed]
+                  enum: [received, needs_attention, submitted, settled, reversed, carrier_paid]
                   description: >-
-                    The status to move the load to. `settled` and `reversed`
-                    emit settlement events onto your /events feed rather than
-                    changing what GET /loads/{ref} reports.
+                    The status to move the load to. `settled`, `reversed` and
+                    `carrier_paid` emit events onto your /events feed rather
+                    than changing what GET /loads/{ref} reports.
                   example: settled
                 disposition:
                   type: string
