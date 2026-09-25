@@ -686,10 +686,21 @@ paths:
         *A carrier's setup:*
 
         - `carrier.onboarded` — a carrier finished the setup form and is now on
-          file for that broker. The `carrier` block mirrors `GET /v1/carriers`
-          exactly, so your existing parser handles it unchanged. This event
-          carries **no `operfi_load_ref`**: a carrier is not a load. The event
-          says "this changed"; `GET /v1/carriers` stays the source of truth.
+          file for that broker. The `carrier` block always carries the base
+          `Carrier` fields, so a parser written against `GET /v1/carriers`
+          handles it unchanged. **On an onboarding you started with `POST
+          /v1/carriers/invite`, it carries considerably more**: address,
+          phone, the contact who completed setup, and FMCSA authority. That is
+          the point of minting the link, so you do not set the carrier up in
+          two places. See `OnboardedCarrier`.
+
+          `carrier_id` and `dnu` are placeholders on this event and are not
+          yet known when it fires. `GET /v1/carriers` remains the source of
+          truth for both, and for the carrier's current state generally.
+
+          🚨 **This event is the only delivery of the extended fields.** They
+          are not on `GET /v1/carriers`. If you miss the event you cannot
+          re-fetch them, so persist what you need when it arrives.
 
         You get `carrier.onboarded` for any broker on your roster, whether or
         not the setup started from your own `POST /v1/carriers/invite` call.
@@ -1534,6 +1545,98 @@ components:
               type: string
               example: "5689"
 
+    OnboardedCarrier:
+      description: >-
+        The carrier as they completed OperFi's setup form. Everything beyond
+        the base `Carrier` fields is present ONLY on an onboarding you
+        started, with `POST /v1/carriers/invite`. Onboardings started by the
+        broker, by OperFi, or by another partner carry the base fields alone.
+
+        Any field OperFi does not have is OMITTED, never sent empty. An
+        absent `authority` means FMCSA could not be read, NOT that the
+        carrier has no authority.
+
+        Payment details are never published here. OperFi pays the carrier;
+        your system does not need their bank.
+      allOf:
+        - $ref: '#/components/schemas/Carrier'
+        - type: object
+          properties:
+            address:
+              type: object
+              properties:
+                street: { type: string, example: "1420 INDUSTRIAL PKWY" }
+                city: { type: string, example: "KNOXVILLE" }
+                state: { type: string, example: "TN" }
+                postal_code: { type: string, example: "37921" }
+            phone:
+              type: string
+              description: The carrier's main line.
+              example: "8655551212"
+            email:
+              type: string
+              description: >-
+                The carrier's main address. Falls back to the address on
+                file with FMCSA when the carrier gave no other.
+              example: "dispatch@blueridgetrucking.com"
+            contact:
+              type: object
+              description: The person who completed setup.
+              properties:
+                first_name: { type: string, example: "DALE" }
+                last_name: { type: string, example: "HARPER" }
+                title: { type: string, example: "Owner" }
+                phone: { type: string, example: "8655559090" }
+                email: { type: string, example: "dale@blueridgetrucking.com" }
+            remittance_email:
+              type: string
+              description: >-
+                🚨 Where OPERFI sends this carrier's payment remittances. It
+                is our payment plumbing, not a general accounts-payable
+                contact. Anything you send here will look to the carrier like
+                it came from their payment chain.
+              example: "ap@blueridgetrucking.com"
+            insurance_email:
+              type: string
+              description: >-
+                Where certificates of insurance are requested. Collected on
+                the `full` form only.
+              example: "certs@midsouthagency.com"
+            authority:
+              type: object
+              description: >-
+                What FMCSA showed when this carrier onboarded, read at most
+                24 hours before `observed_at`. A SNAPSHOT: OperFi does not
+                revisit it, so re-check before relying on it months later.
+                Omitted entirely when FMCSA could not be read.
+              properties:
+                class:
+                  type: string
+                  enum: [carrier, broker_only, dual, none]
+                  description: >-
+                    OperFi's reading. `dual` and `broker_only` are
+                    double-brokering risk. `none` means FMCSA shows no active
+                    authority, which is different from this object being
+                    absent.
+                  example: carrier
+                common: { type: string, example: "Active" }
+                contract: { type: string, example: "Active" }
+                broker: { type: string, example: "None" }
+                entity_type: { type: string, example: "CARRIER" }
+                observed_at:
+                  type: string
+                  format: date-time
+                  description: >-
+                    When OperFi built this event. The FMCSA read behind it is
+                    at most 24 hours older.
+                  example: "2026-09-24T14:02:11Z"
+            fleet:
+              type: object
+              description: Self-reported on the `full` form only.
+              properties:
+                power_units: { type: integer, example: 12 }
+                drivers: { type: integer, example: 14 }
+
     CarrierOnboardedEvent:
       type: object
       required: [seq, type, carrier, recorded_at]
@@ -1550,7 +1653,7 @@ components:
           enum: [carrier.onboarded]
           example: carrier.onboarded
         carrier:
-          $ref: '#/components/schemas/Carrier'
+          $ref: '#/components/schemas/OnboardedCarrier'
         form:
           type: string
           enum: [pay, full]
