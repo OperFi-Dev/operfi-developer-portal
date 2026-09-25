@@ -331,10 +331,34 @@ tags:
     description: >-
       Start a carrier's OperFi setup from inside your own product, so your
       broker never has to set the same carrier up twice.
-  - name: Settlement
+
+
+      When the carrier finishes, the full record of what they entered arrives
+      on your event feed as `carrier.onboarded`. It is documented under
+      **Events**, because one feed carries every event type.
+  - name: Events
     description: >-
-      Learn when a debtor paid a load you pushed, and what actually happened to
-      the money.
+      One append-only feed carrying everything OperFi has to tell you after a
+      load or a carrier leaves your hands. You poll it; OperFi never posts to
+      an endpoint you host, and there is nothing to register.
+
+
+      Four event types, three families:
+
+
+      - `load.settled` and `load.settlement_reversed`: the receivable
+      resolved, and the rarer case where a settlement is retracted.
+
+      - `carrier.paid`: the carrier on a load you pushed has been paid.
+
+      - `carrier.onboarded`: a carrier finished setup and is on file. On an
+      onboarding you started with `POST /v1/carriers/invite`, this carries
+      their full record: address, phone, the person who completed setup, and
+      FMCSA authority.
+
+
+      One cursor, one loop. Implement the poll once and every type above
+      arrives through it.
   - name: Sandbox
     description: >-
       Sandbox-only controls for testing. These return 404 in production and are
@@ -565,6 +589,21 @@ paths:
         `carrier.onboarded` event lands on `/v1/events`. You never poll a
         separate status.
 
+        ### What you get back
+
+        Because you minted the link, that event carries the carrier's full
+        record, not just their name and DOT: address, main phone and email,
+        the person who completed setup and how to reach them, and what FMCSA
+        showed for their authority at the time. That is the point of minting
+        the link, so nobody re-keys the carrier into your system by hand.
+
+        The exact shape is the `OnboardedCarrier` schema, documented with the
+        feed under **Events**. Two things to know before you build against it:
+        fields OperFi does not have are omitted rather than sent empty, and
+        this event is the only delivery of the extended fields, so persist
+        what you need when it arrives. `GET /v1/carriers` returns the base
+        fields only.
+
         ### You do not send the broker, and you cannot
 
         The broker is resolved server-side from your API key plus
@@ -642,12 +681,15 @@ paths:
 
   /events:
     get:
-      tags: [Settlement]
-      summary: Poll settlement events for loads you pushed
+      tags: [Events]
+      summary: Poll your event feed
       operationId: listEvents
       description: |
-        An append-only log of what happened to the money on loads you pushed.
-        You poll it; OperFi never posts to an endpoint you host.
+        An append-only log of what happened to the loads and carriers you sent
+        us. You poll it; OperFi never posts to an endpoint you host.
+
+        This is the only feed. Settlement and carrier events arrive through the
+        same cursor, so you implement this loop once.
 
         Events are immutable and ordered by `seq`, a monotonically increasing
         integer. Store the `next_cursor` you receive and send it back as
