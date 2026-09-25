@@ -94,8 +94,8 @@ info:
     smaller set of names.
 
     Settlement is the exception. No money moves, but you can emit a real
-    settlement event on demand — paid in full, short paid, charged back, or a
-    reversal of a settlement you were already told about — so you can test the
+    settlement event on demand (paid in full, short paid, charged back, or a
+    reversal of a settlement you were already told about) so you can test the
     code that handles one without waiting for a debtor. See
     `POST /sandbox/loads/{ref}/advance`.
 
@@ -237,7 +237,7 @@ info:
     ## What this API does not do
 
     There are no outbound webhooks and no payment callbacks. Settlement data is
-    delivered by polling `GET /v1/events` — OperFi never posts to an endpoint you
+    delivered by polling `GET /v1/events`. OperFi never posts to an endpoint you
     host. `GET /v1/loads/{ref}` still returns integration status only: money lives
     on the event feed, not on the load.
 
@@ -625,9 +625,9 @@ paths:
 
         ### Which form
 
-        - `pay` (default) — banking and payment details. The common case, for a
+        - `pay` (default): banking and payment details. The common case, for a
           carrier your broker has already agreed to haul with.
-        - `full` — the complete carrier packet, including the agreement.
+        - `full`: the complete carrier packet, including the agreement.
 
         ### Enablement
 
@@ -705,15 +705,15 @@ paths:
 
         *Money on a load you pushed:*
 
-        - `load.settled` — the receivable resolved. `disposition` says how:
+        - `load.settled`: the receivable resolved. `disposition` says how:
           `paid_in_full`, `short_paid`, or `charged_back`. A load that ages out
           unpaid and is charged back to reserve is a `load.settled` carrying
           `charged_back`: there was never a payment to retract.
-        - `load.settlement_reversed` — a settlement you were already told about
+        - `load.settlement_reversed`: a settlement you were already told about
           is being retracted, typically a returned check or a later chargeback.
           `reverses_seq` points at the `seq` of the `load.settled` event it
           undoes. A load can settle, reverse, and settle again.
-        - `carrier.paid` — the carrier on that load has been paid, so you can
+        - `carrier.paid`: the carrier on that load has been paid, so you can
           close the load out on your side. Carries who was paid, how much, the
           pay terms and the reference numbers.
 
@@ -727,7 +727,7 @@ paths:
 
         *A carrier's setup:*
 
-        - `carrier.onboarded` — a carrier finished the setup form and is now on
+        - `carrier.onboarded`: a carrier finished the setup form and is now on
           file for that broker. The `carrier` block always carries the base
           `Carrier` fields, so a parser written against `GET /v1/carriers`
           handles it unchanged. **On an onboarding you started with `POST
@@ -762,7 +762,7 @@ paths:
         be emitted until the load's invoice has resolved on OperFi's side. A
         load whose invoice never resolves produces neither event.
 
-        `carrier.onboarded` is prompt — it follows the carrier finishing the
+        `carrier.onboarded` is prompt: it follows the carrier finishing the
         form, not any daily cycle. It still arrives on your normal cursor
         poll; there is no webhook and no callback for any event type.
       parameters:
@@ -862,8 +862,8 @@ paths:
         {"status": "reversed"}
         ```
 
-        `settled` requires a `disposition` — `paid_in_full`, `short_paid`, or
-        `charged_back` — and emits a `load.settled`. `reversed` emits a
+        `settled` requires a `disposition` (`paid_in_full`, `short_paid`, or
+        `charged_back`) and emits a `load.settled`. `reversed` emits a
         `load.settlement_reversed` retracting the settlement before it, which
         is the case worth testing hardest: your integration has to un-mark a
         load it already reported as paid.
@@ -880,7 +880,7 @@ paths:
         to a usable invoice amount.
 
         You can settle, reverse, and settle the same load again. Events are
-        immutable, so each is a new entry rather than an edit — exactly as in
+        immutable, so each is a new entry rather than an edit, exactly as in
         production.
 
         ## Simulating a carrier payment
@@ -899,7 +899,7 @@ paths:
         never funded has no carrier payment, so the sandbox refuses it.
 
         The amount comes from the `carrier_rate` you submitted, and the carrier
-        block from the carrier the load resolved to — so `vendor_name` arrives
+        block from the carrier the load resolved to, so `vendor_name` arrives
         packed as `NAME | USDOT` and is split exactly as production splits it.
         A load pushed without a carrier rate falls back to a usable amount.
 
@@ -1045,7 +1045,7 @@ components:
         The `next_cursor` from your previous `/events` call. Unlike the opaque
         cursor used elsewhere in this API, this is a monotonically increasing
         integer sequence number: you receive events whose `seq` is strictly
-        greater than it. Omit it, or send `0`, to read from the beginning — `0`
+        greater than it. Omit it, or send `0`, to read from the beginning. `0`
         is always valid no matter how far the log has been trimmed.
       schema:
         type: integer
@@ -1785,8 +1785,8 @@ components:
           type: string
           enum: [load.settled, load.settlement_reversed]
           description: >-
-            `load.settled` — the receivable resolved. `load.settlement_reversed`
-            — a settlement you were already told about is being retracted.
+            `load.settled` is the receivable resolved. `load.settlement_reversed`
+            means a settlement you were already told about is being retracted.
           example: load.settled
         operfi_load_ref:
           type: string
@@ -1796,7 +1796,7 @@ components:
           type: string
           description: >-
             Your own reference from when you pushed the load. NOT unique in this
-            feed — see the endpoint description. Empty if the load did not come
+            feed, see the endpoint description. Empty if the load did not come
             from you.
           example: TMS-88231
         disposition:
@@ -1827,7 +1827,7 @@ components:
           type: string
           description: >-
             Present on `load.settlement_reversed` only. The amount being
-            retracted — the settled amount, not the invoice face value.
+            retracted: the settled amount, not the invoice face value.
           example: "1776.81"
         reverses_seq:
           type: integer
