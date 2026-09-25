@@ -694,9 +694,11 @@ paths:
           the point of minting the link, so you do not set the carrier up in
           two places. See `OnboardedCarrier`.
 
-          `carrier_id` and `dnu` are placeholders on this event and are not
-          yet known when it fires. `GET /v1/carriers` remains the source of
-          truth for both, and for the carrier's current state generally.
+          `carrier_id` is always `""` and `dnu` is always `false` on this
+          event: neither is known yet when it fires. Both keys are present,
+          not omitted, so test the value rather than the key. `GET
+          /v1/carriers` remains the source of truth for both, and for the
+          carrier's current state generally.
 
           🚨 **This event is the only delivery of the extended fields.** They
           are not on `GET /v1/carriers`. If you miss the event you cannot
@@ -1552,9 +1554,19 @@ components:
         started, with `POST /v1/carriers/invite`. Onboardings started by the
         broker, by OperFi, or by another partner carry the base fields alone.
 
-        Any field OperFi does not have is OMITTED, never sent empty. An
-        absent `authority` means FMCSA could not be read, NOT that the
-        carrier has no authority.
+        The five base `Carrier` fields are ALWAYS present, and they are the
+        deliberate exception to the omission rule below. On this event
+        `carrier_id` is always `""` and `dnu` is always `false`, because
+        neither is known yet at the moment the carrier finishes the form.
+        `mc` and `usdot` are `""` for a carrier who does not have one. Do not
+        test these five with `if "mc" in carrier`: the key is present either
+        way, and you would read `""` as a real MC number. Test the value.
+        `GET /v1/carriers` is the source of truth for all five.
+
+        Of the EXTENDED fields below, any that OperFi does not have is
+        OMITTED, never sent empty. That is how you tell "we do not have this"
+        from "this is blank". An absent `authority` means FMCSA could not be
+        read, NOT that the carrier has no authority.
 
         Payment details are never published here. OperFi pays the carrier;
         your system does not need their bank.
