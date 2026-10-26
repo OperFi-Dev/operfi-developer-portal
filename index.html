@@ -49,6 +49,10 @@
   </style>
 </head>
 <body>
+  <!-- Brand colors come from the logo: gold #FFCA08, grey #939598, and the
+       favicon's charcoal #1d1d1f. Logo gold is 1.5:1 on white, unreadable as
+       text, so it is never used on the light panes; links take a darkened gold
+       (#7a5f00, 6:1) and the charcoal code panel carries the brand instead. -->
   <redoc
     spec-url="openapi.yaml"
     expand-responses="200"
@@ -56,13 +60,16 @@
     sort-props-alphabetically="false"
     hide-download-button="false"
     theme='{
-      "colors": { "primary": { "main": "#0b5cad" } },
+      "colors": { "primary": { "main": "#1d1d1f" } },
       "typography": {
         "fontFamily": "Inter, system-ui, sans-serif",
         "headings": { "fontFamily": "Inter, system-ui, sans-serif", "fontWeight": "700" },
-        "code": { "fontFamily": "ui-monospace, SFMono-Regular, Menlo, monospace" }
+        "code": { "fontFamily": "ui-monospace, SFMono-Regular, Menlo, monospace", "color": "#1d1d1f", "backgroundColor": "#f3f1ec" },
+        "links": { "color": "#7a5f00", "hover": "#1d1d1f" }
       },
-      "sidebar": { "width": "300px" }
+      "sidebar": { "width": "300px", "backgroundColor": "#f6f6f4", "activeTextColor": "#1d1d1f" },
+      "rightPanel": { "backgroundColor": "#1d1d1f" },
+      "logo": { "gutter": "24px 32px" }
     }'
   ></redoc>
   <!-- Pinned, never `latest`. `latest` moved to Redoc 3 on 2026-10-14, which

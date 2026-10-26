@@ -310,6 +310,10 @@ info:
   contact:
     name: OperFi Integrations
     email: integrations@operfi.com
+  x-logo:
+    url: operfi-logo.png
+    altText: OperFi
+    href: https://www.operfi.com
 
 servers:
   - url: https://operfi-broker-api-sandbox.onrender.com/v1
