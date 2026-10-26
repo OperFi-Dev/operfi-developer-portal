@@ -65,6 +65,9 @@
       "sidebar": { "width": "300px" }
     }'
   ></redoc>
-  <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+  <!-- Pinned, never `latest`. `latest` moved to Redoc 3 on 2026-10-14, which
+       dropped the window.Redoc global and the <redoc> tag auto-render, and
+       this page went blank with no console error. -->
+  <script src="https://cdn.redoc.ly/redoc/v2.5.1/bundles/redoc.standalone.js"></script>
 </body>
 </html>
