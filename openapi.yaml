@@ -65,7 +65,7 @@ info:
     | `sbx_carr_1` | BLUE RIDGE TRUCKING | `MC111111` / `1111111` | Net 30 | The normal path |
     | `sbx_carr_2` | CASCADE CARRIERS | `MC222222` / `2222222` | Quick Pay | Resolving by MC or USDOT |
     | `sbx_carr_3` | DELTA FREIGHT LINES | `MC333333` / `3333333` | Factoring Company | A carrier paid through a factor |
-    | `sbx_carr_4` | ECHO TRANSPORT | `MC444444` / `4444444` | Net 30 | Flagged **do not use** (`dnu: true`) |
+    | `sbx_carr_4` | ECHO TRANSPORT | `MC444444` / `4444444` | Net 30 | Flagged **do not use** (`dnu: true`). A load naming it lands with the carrier blank and a `carrier_not_resolved` warning |
 
     Useful cases these let you build deliberately: send `carrier_mc` and
     `carrier_usdot` belonging to two *different* carriers to see a conflict go
@@ -223,9 +223,42 @@ info:
     ## Validation: lenient on create, strict on submit
 
     A load with an unmatched customer/carrier or missing rates still lands as a
-    draft; the gaps come back as `warnings`. Only a malformed payload (for
-    example, a missing `source_load_ref`) is `rejected`. The broker resolves any
-    warnings and submits the load inside OperFi.
+    draft; the gaps come back as `warnings`. The broker resolves any warnings
+    and submits the load inside OperFi.
+
+    A load is `rejected`, and no draft is created, only when a value is
+    malformed. Each rejection names the `field`:
+
+    - `source_load_ref` is missing, longer than 255 characters, or contains a
+      double quote, a backslash or a control character.
+    - A text field is not a string, or is longer than 255 characters
+      (`load_comments`: 65,535). A JSON integer is accepted where a string is
+      expected, so a numeric reference or ID does not need quoting.
+    - `customer_rate` or `carrier_rate` is not a number, is negative, or is
+      100,000,000 or more. Send at most 2 decimal places.
+
+    One rejected load never affects the others in the same request.
+
+    The sandbox and production apply the same checks. A request the sandbox
+    accepts is a request production accepts.
+
+    ## Limits
+
+    | Limit | Value |
+    |---|---|
+    | Loads per `POST /v1/loads` request | 25 |
+    | Requests per API key | 120 per minute, across all endpoints |
+    | Files per document upload request | 10 |
+    | File size | 25 MB each |
+    | File formats | PDF, PNG, JPG, TIFF |
+
+    Past the request limit you receive `429 rate_limited` with a `Retry-After`
+    header giving the seconds to wait. Requests that return 429 are not
+    processed, so retry them after the wait.
+
+    A large batch that cannot finish in time returns its unprocessed loads as
+    `rejected` with code `internal_error` and a message that says the load is
+    safe to retry. Loads already processed in that request keep their results.
 
     ## Identity
 
@@ -257,7 +290,7 @@ info:
     {
       "error": {
         "code": "validation_error",
-        "message": "carrier_rate must be a positive number.",
+        "message": "carrier_rate must be a number.",
         "field": "carrier_rate",
         "request_id": "req_01H..."
       }
@@ -274,11 +307,11 @@ info:
 
     | Code | Field | What it means | What to do |
     |---|---|---|---|
-    | `customer_not_resolved` | `customer_name` | The name did not match a credit-approved customer on file. | Send `customer_id` or `customer_fv_id`, or let the broker resolve it. |
+    | `customer_not_resolved` | `customer_name` or `customer_id` | The name, or the `customer_id` you sent, did not match a credit-approved customer on this client's account. An ID that misses is never followed by a name match. | Take the ID from `GET /v1/customers`, or let the broker resolve it. |
     | `customer_fv_id_not_found` | `customer_fv_id` | The FactorView ID matched nothing. **No name fallback is attempted.** | Re-check the ID against `GET /v1/customers`. Send `customer_name` instead if you do not hold a real ID. |
-    | `carrier_not_resolved` | `carrier_mc` | No carrier matched, or the MC and USDOT you sent point at two different carriers on file. | Send `carrier_id`, or send only the identifier you trust. |
+    | `carrier_not_resolved` | `carrier_mc` or `carrier_id` | No carrier on this client's account matched, the MC and USDOT you sent point at two different carriers, or the carrier is marked do-not-use (`dnu: true`). The load lands with the carrier blank. | Take the ID from `GET /v1/carriers` and skip carriers flagged `dnu`, or let the broker resolve it. |
     | `load_status_not_recognized` | `load_status` | The value was not one of the seven accepted statuses. The load landed; no status was recorded. | Map your TMS status onto one of the seven values, or omit the field. |
-    | `validation_error` | varies | A field required *to submit* is still missing. The draft exists; it just cannot be submitted yet. | Supply the field, or upload the missing document. |
+    | `validation_error` | varies | A field required *to submit* is still missing. The draft exists; it just cannot be submitted yet. On `source_payload`, it means the payload was over 65,535 characters and was not stored; the load itself landed. | Supply the field, or upload the missing document. |
 
     **Errors** - returned in the `error` envelope, or per-load under `errors`
     when a load's `status` is `rejected`.
@@ -288,10 +321,14 @@ info:
     | `unauthorized` | 401 | Missing, invalid, or wrong-environment key. An `sk_test_` key on production, or an `sk_live_` key on the sandbox, lands here. |
     | `forbidden_client_ref` | 403 | Your key is not authorized for the `OperFi-Client-Ref` you sent. |
     | `load_not_found` | 404 | No load with that reference on this client's account. Also returned for a malformed reference. |
-    | `payload_too_large` | 413 | The upload exceeded the size limit. |
-    | `validation_error` | 422 | The request or an individual load was malformed. No draft was created for that load. |
-    | `rate_limited` | 429 | Slow down and retry after a pause. |
-    | `internal_error` | 500 | Something failed on our side. Safe to retry; quote `request_id` if it persists. |
+    | `not_found` | 404 | No such endpoint. Check the path. |
+    | `method_not_allowed` | 405 | The endpoint exists but does not accept that HTTP method. |
+    | `load_already_submitted` | 409 | The broker has submitted this load. It no longer accepts documents through the API. Upload paperwork while the load is still a draft. |
+    | `payload_too_large` | 413 | A file exceeded 25 MB, or the request exceeded the size limit. |
+    | `unsupported_document_type` | 415 | The `document_type` is not one of the listed values, or a file is not PDF, PNG, JPG or TIFF. |
+    | `validation_error` | 422 | The request or an individual load was malformed. No draft was created for that load. On an upload: no file was sent, a file was empty, or more than 10 files were sent. |
+    | `rate_limited` | 429 | Over 120 requests in a minute on this key. Wait the number of seconds in `Retry-After`, then retry. |
+    | `internal_error` | 500, 502 | Something failed on our side. The `message` says whether a retry will help. Quote `request_id`, or the `source_load_ref` for a per-load error, when contacting us. |
 
     ## Versioning
 
@@ -409,7 +446,7 @@ paths:
         use that queue. The usual shape is a broker-side switch in your product
         that pushes on delivery, for the loads that broker wants staged with us.
 
-        Up to 500 loads per request. Split larger batches client-side.
+        Up to 25 loads per request. Split larger batches client-side.
       parameters:
         - $ref: '#/components/parameters/ClientRef'
       requestBody:
@@ -435,7 +472,7 @@ paths:
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '422':
-          description: The batch could not be processed as a whole (e.g. exceeds the 500-load cap or is not a valid loads array).
+          description: The batch could not be processed as a whole (e.g. exceeds the 25-load cap or is not a valid loads array).
           content:
             application/json:
               schema:
@@ -479,7 +516,15 @@ paths:
       description: |
         Upload one or more files to a load. Tag each file with its
         `document_type` so OperFi routes it to the correct customer or carrier
-        packet. Max 25 MB per file. Accepted: PDF, PNG, JPG, TIFF.
+        packet. Max 25 MB per file, 10 files per request. Accepted: PDF, PNG,
+        JPG, TIFF.
+
+        Every file in the request is checked before any is stored. If one file
+        is the wrong format, empty or too large, the request is refused and
+        nothing is stored, so a load is never left with half a packet.
+
+        Documents can be added only while the load is a draft. After the broker
+        submits it, this endpoint returns `409 load_already_submitted`.
       parameters:
         - $ref: '#/components/parameters/LoadRef'
         - $ref: '#/components/parameters/ClientRef'
@@ -505,10 +550,33 @@ paths:
           $ref: '#/components/responses/ForbiddenClientRef'
         '404':
           $ref: '#/components/responses/LoadNotFound'
+        '409':
+          description: The load has been submitted and no longer accepts documents.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: load_already_submitted
+                  message: This load has been submitted and no longer accepts documents through the API.
+                  request_id: req_01HZ8XK2Q1
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '415':
           description: One or more files use an unsupported document type or file format.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: No file was sent, a file was empty, or more than 10 files were sent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: No file could be stored. Nothing was saved. Safe to retry.
           content:
             application/json:
               schema:
@@ -1158,8 +1226,8 @@ components:
         loads:
           type: array
           minItems: 1
-          maxItems: 500
-          description: The loads to create. Max 500 per request.
+          maxItems: 25
+          description: The loads to create. Max 25 per request.
           items:
             $ref: '#/components/schemas/LoadInput'
 
@@ -1183,10 +1251,18 @@ components:
             only the load status is updated on the submitted load and the result
             is `status_updated`. That is how you report a load moving after the
             broker has already sent it to us. See the endpoint description.
+            Max 255 characters. May not contain a double quote, a backslash
+            or a control character. A JSON integer is accepted.
+          maxLength: 255
           example: "TMS-88231"
         customer_id:
           type: string
-          description: OperFi customer ID from `GET /v1/customers`. Preferred; lands resolved.
+          description: >-
+            OperFi customer ID from `GET /v1/customers`. Preferred; lands
+            resolved. Checked against this client's credit-approved customers.
+            An ID that is not on that list lands the load with the customer
+            blank and a `customer_not_resolved` warning; `customer_name` is not
+            tried.
           example: "3773785000000956013"
         customer_fv_id:
           type: string
@@ -1209,11 +1285,19 @@ components:
         customer_rate:
           type: number
           format: double
-          description: Amount billed to the customer, in USD.
+          minimum: 0
+          description: >-
+            Amount billed to the customer, in USD. A number, or a numeric
+            string with at most 2 decimal places. Must be 0 or greater and
+            under 100,000,000. Anything else rejects the load.
           example: 2400.00
         carrier_id:
           type: string
-          description: OperFi carrier (vendor) ID from `GET /v1/carriers`. Preferred; lands resolved.
+          description: >-
+            OperFi carrier (vendor) ID from `GET /v1/carriers`. Preferred; lands
+            resolved. Checked against this client's carriers. An ID that is not
+            on that list, or a carrier flagged `dnu`, lands the load with the
+            carrier blank and a `carrier_not_resolved` warning.
           example: "3773785000000370055"
         carrier_mc:
           type: string
@@ -1226,7 +1310,9 @@ components:
         carrier_rate:
           type: number
           format: double
-          description: Amount paid to the carrier, in USD.
+          minimum: 0
+          description: >-
+            Amount paid to the carrier, in USD. Same rules as `customer_rate`.
           example: 2000.00
         carrier_factoring_invoice:
           type: string
@@ -1360,7 +1446,8 @@ components:
         files:
           type: array
           minItems: 1
-          description: One or more files. Max 25 MB each. PDF, PNG, JPG, or TIFF.
+          maxItems: 10
+          description: One to 10 files. Max 25 MB each. PDF, PNG, JPG, or TIFF. An empty file is refused.
           items:
             type: string
             format: binary
@@ -1374,8 +1461,14 @@ components:
           example: "4200000000001"
         uploaded:
           type: integer
-          description: Number of files accepted.
+          description: Number of files stored.
           example: 2
+        failed:
+          type: integer
+          description: >-
+            Number of files that passed validation but could not be stored.
+            Normally 0. When it is not, re-send only the missing files.
+          example: 0
         document_type:
           type: string
           example: rate_confirmation
@@ -1872,6 +1965,9 @@ components:
                 - carrier_not_resolved
                 - duplicate_load_ref
                 - load_not_found
+                - not_found
+                - method_not_allowed
+                - load_already_submitted
                 - unsupported_document_type
                 - payload_too_large
                 - rate_limited
@@ -1879,7 +1975,7 @@ components:
               example: validation_error
             message:
               type: string
-              example: carrier_rate must be a positive number.
+              example: carrier_rate must be a number.
             field:
               type: string
               description: The offending field, when applicable.
