@@ -439,12 +439,33 @@ paths:
         the moment you sent it; we do not verify it and we make no claim of our
         own about where the truck is.
 
+        ### Push early, send paperwork later
+
+        A load does not need paperwork, rates or a delivery to exist with us.
+        You can push it the moment it is covered or dispatched, with a
+        `load_status` and whatever else you know, and it lands as a draft. The
+        expected lifecycle for a TMS that reports load status is:
+
+        1. Push the load when it is booked, with `load_status` (for example
+           `Covered` or `Dispatched`).
+        2. Re-send it with the same `source_load_ref` as it moves (`In Transit`,
+           `Delivered`, `POD Received`).
+        3. Attach paperwork with `POST /v1/loads/{ref}/documents` whenever you
+           have it. A draft accepts documents at any `load_status`.
+        4. The broker submits the load in OperFi once the packet is complete.
+        5. Keep sending `load_status` after submission if the load is still
+           moving. Only the status changes.
+
+        The one thing that closes after submission is document upload: the
+        packet is fixed at the point the broker submits.
+
         ### Push what the broker wants staged, not their whole book
 
         Every load you push becomes a record on the broker's side. A broker who
         finds their entire month of freight in their OperFi draft queue cannot
         use that queue. The usual shape is a broker-side switch in your product
-        that pushes on delivery, for the loads that broker wants staged with us.
+        that chooses which loads are staged with us, and when: at booking if you
+        report load status as the load moves, or at delivery if you do not.
 
         Up to 25 loads per request. Split larger batches client-side.
       parameters:
@@ -523,8 +544,10 @@ paths:
         is the wrong format, empty or too large, the request is refused and
         nothing is stored, so a load is never left with half a packet.
 
-        Documents can be added only while the load is a draft. After the broker
-        submits it, this endpoint returns `409 load_already_submitted`.
+        Documents can be added only while the load is a draft. A draft accepts
+        documents at any `load_status`, so a load pushed while in transit can
+        receive its paperwork days later. After the broker submits it, this
+        endpoint returns `409 load_already_submitted`.
       parameters:
         - $ref: '#/components/parameters/LoadRef'
         - $ref: '#/components/parameters/ClientRef'
